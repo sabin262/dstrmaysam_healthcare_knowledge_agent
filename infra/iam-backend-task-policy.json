@@ -1,0 +1,48 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadRequiredSecrets",
+      "Effect": "Allow",
+      "Action": "secretsmanager:GetSecretValue",
+      "Resource": [
+        "arn:aws:secretsmanager:<region>:<account-id>:secret:/company-assistant/prod/app-*",
+        "arn:aws:secretsmanager:<region>:<account-id>:secret:/company-assistant/prod/azure-openai-*",
+        "arn:aws:secretsmanager:<region>:<account-id>:secret:/company-assistant/prod/langfuse-*"
+      ]
+    },
+    {
+      "Sid": "ReadWriteKnowledgeBucket",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:PutObject",
+        "s3:ListBucket"
+      ],
+      "Resource": [
+        "arn:aws:s3:::<documents-bucket>",
+        "arn:aws:s3:::<documents-bucket>/*"
+      ]
+    },
+    {
+      "Sid": "ReadWriteChatHistory",
+      "Effect": "Allow",
+      "Action": [
+        "dynamodb:GetItem",
+        "dynamodb:PutItem",
+        "dynamodb:Query",
+        "dynamodb:UpdateItem"
+      ],
+      "Resource": "arn:aws:dynamodb:<region>:<account-id>:table/company_assistant_chat_history"
+    },
+    {
+      "Sid": "OpenSearchServerlessAccess",
+      "Effect": "Allow",
+      "Action": [
+        "aoss:APIAccessAll"
+      ],
+      "Resource": "arn:aws:aoss:<region>:<account-id>:collection/<collection-id>"
+    }
+  ]
+}
+

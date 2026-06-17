@@ -1,0 +1,40 @@
+{
+  "settings": {
+    "index.knn": true
+  },
+  "mappings": {
+    "properties": {
+      "embedding": {
+        "type": "knn_vector",
+        "dimension": 1536,
+        "space_type": "cosinesimil"
+      },
+      "key": {
+        "type": "keyword"
+      },
+      "title": {
+        "type": "text"
+      },
+      "uri": {
+        "type": "keyword"
+      },
+      "text": {
+        "type": "text"
+      },
+      "content_type": {
+        "type": "keyword"
+      },
+      "chunk_index": {
+        "type": "integer"
+      },
+      "checksum": {
+        "type": "keyword"
+      },
+      "metadata": {
+        "type": "object",
+        "enabled": true
+      }
+    }
+  }
+}
+

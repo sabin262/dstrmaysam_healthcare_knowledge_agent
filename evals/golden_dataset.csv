@@ -1,0 +1,7 @@
+question,expected_answer,expected_sources,tags
+What is the company leave policy?,The answer should cite the HR leave policy document.,leave-policy,hr
+How do I request access to internal systems?,The answer should cite the IT access request process.,access-request,it
+What is the expense reimbursement process?,The answer should cite the finance expense policy.,expense-policy,finance
+Where can I find onboarding steps for new hires?,The answer should cite onboarding documentation.,onboarding,hr
+Who should I contact for laptop issues?,The answer should cite IT support guidance.,it-support,it
+

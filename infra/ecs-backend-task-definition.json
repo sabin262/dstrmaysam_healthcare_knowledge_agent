@@ -1,0 +1,46 @@
+{
+  "family": "company-assistant-backend",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "1024",
+  "memory": "2048",
+  "executionRoleArn": "arn:aws:iam::<account-id>:role/company-assistant-ecs-execution-role",
+  "taskRoleArn": "arn:aws:iam::<account-id>:role/company-assistant-backend-task-role",
+  "containerDefinitions": [
+    {
+      "name": "backend",
+      "image": "<account-id>.dkr.ecr.<region>.amazonaws.com/company-assistant-backend:latest",
+      "essential": true,
+      "portMappings": [
+        {
+          "containerPort": 8000,
+          "protocol": "tcp"
+        }
+      ],
+      "environment": [
+        {"name": "APP_ENV", "value": "prod"},
+        {"name": "AWS_REGION", "value": "<region>"},
+        {"name": "SECRETS_STAGE", "value": "prod"},
+        {"name": "APP_SECRET_NAME", "value": "/company-assistant/prod/app"},
+        {"name": "AZURE_OPENAI_SECRET_NAME", "value": "/company-assistant/prod/azure-openai"},
+        {"name": "LANGFUSE_SECRET_NAME", "value": "/company-assistant/prod/langfuse"},
+        {"name": "S3_BUCKET", "value": "<documents-bucket>"},
+        {"name": "S3_RAW_PREFIX", "value": "raw/"},
+        {"name": "S3_MANIFEST_KEY", "value": "manifests/documents.json"},
+        {"name": "OPENSEARCH_ENDPOINT", "value": "https://<collection-id>.<region>.aoss.amazonaws.com"},
+        {"name": "OPENSEARCH_INDEX", "value": "company-knowledge"},
+        {"name": "DYNAMODB_CHAT_TABLE", "value": "company_assistant_chat_history"},
+        {"name": "CHAT_HISTORY_BACKEND", "value": "dynamodb"}
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/company-assistant/backend",
+          "awslogs-region": "<region>",
+          "awslogs-stream-prefix": "ecs"
+        }
+      }
+    }
+  ]
+}
+

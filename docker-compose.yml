@@ -1,0 +1,33 @@
+services:
+  backend:
+    build:
+      context: ./backend
+    environment:
+      APP_ENV: local
+      AWS_REGION: ${AWS_REGION:-eu-west-2}
+      SECRETS_STAGE: ${SECRETS_STAGE:-dev}
+      APP_SECRET_NAME: ${APP_SECRET_NAME:-/company-assistant/dev/app}
+      AZURE_OPENAI_SECRET_NAME: ${AZURE_OPENAI_SECRET_NAME:-/company-assistant/dev/azure-openai}
+      LANGFUSE_SECRET_NAME: ${LANGFUSE_SECRET_NAME:-/company-assistant/dev/langfuse}
+      S3_BUCKET: ${S3_BUCKET:-company-assistant-dev}
+      S3_RAW_PREFIX: ${S3_RAW_PREFIX:-raw/}
+      S3_MANIFEST_KEY: ${S3_MANIFEST_KEY:-manifests/documents.json}
+      OPENSEARCH_ENDPOINT: ${OPENSEARCH_ENDPOINT:-}
+      OPENSEARCH_INDEX: ${OPENSEARCH_INDEX:-company-knowledge}
+      DYNAMODB_CHAT_TABLE: ${DYNAMODB_CHAT_TABLE:-company_assistant_chat_history}
+      CHAT_HISTORY_BACKEND: ${CHAT_HISTORY_BACKEND:-memory}
+      LOCAL_TEST_ADMIN_ENABLED: ${LOCAL_TEST_ADMIN_ENABLED:-true}
+      LOCAL_TEST_ADMIN_USERNAME: ${LOCAL_TEST_ADMIN_USERNAME:-admin}
+      LOCAL_TEST_ADMIN_PASSWORD: ${LOCAL_TEST_ADMIN_PASSWORD:-admin123}
+    ports:
+      - "8000:8000"
+
+  frontend:
+    build:
+      context: ./frontend
+    environment:
+      BACKEND_URL: ${BACKEND_URL:-http://backend:8000}
+    ports:
+      - "8501:8501"
+    depends_on:
+      - backend
