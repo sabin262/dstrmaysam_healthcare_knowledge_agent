@@ -16,7 +16,7 @@ from backend.app.secrets import SecretProvider, SecretProviderError
 def auth_test_settings(app_env: str = "local", local_test_admin_enabled: bool = True) -> AppSettings:
     return AppSettings(
         app_env=app_env,
-        aws_region="us-east-1",
+        aws_region="eu-west-2",
         secrets_stage="test",
         app_secret_name="/test/app",
         azure_openai_secret_name="/test/azure",

@@ -20,8 +20,20 @@ def format_retrieval_hits(hits: list[RetrievalHit]) -> str:
         return "No relevant document chunks found."
     lines: list[str] = []
     for index, hit in enumerate(hits, start=1):
+        facts = hit.metadata.get("facts") if isinstance(hit.metadata, dict) else None
+        details = {
+            key: value
+            for key, value in {
+                "chunk_index": hit.metadata.get("_chunk_index"),
+                "domain": hit.metadata.get("domain"),
+                "document_type": hit.metadata.get("document_type"),
+                "facts": facts,
+            }.items()
+            if value not in (None, "", {})
+        }
+        detail_text = f"\nMetadata: {json.dumps(details, sort_keys=True)}" if details else ""
         lines.append(
-            f"[{index}] {hit.title} ({hit.uri}, score={hit.score})\n{hit.text[:1200]}"
+            f"[{index}] {hit.title} ({hit.uri}, score={hit.score}){detail_text}\n{hit.text[:1200]}"
         )
     return "\n\n".join(lines)
 

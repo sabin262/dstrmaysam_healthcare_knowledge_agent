@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import time
 import uuid
 from dataclasses import dataclass
 from types import TracebackType
@@ -65,6 +66,7 @@ class ObservabilityClient:
         self.secret_provider = secret_provider
         self._callbacks: list[Any] | None = None
         self._langfuse_client: Any | None = None
+        self._system_prompt_cache: tuple[str, str | None, float] | None = None
 
     def new_trace_id(self) -> str:
         return uuid.uuid4().hex
@@ -120,6 +122,12 @@ class ObservabilityClient:
         return self._callbacks
 
     def system_prompt(self) -> tuple[str, str | None]:
+        ttl_seconds = max(0, self.settings.langfuse_prompt_cache_ttl_seconds)
+        now = time.monotonic()
+        if self._system_prompt_cache is not None:
+            cached_prompt, cached_version, expires_at = self._system_prompt_cache
+            if ttl_seconds and now < expires_at:
+                return cached_prompt, cached_version
         try:
             client = self._get_langfuse_client()
             prompt = client.get_prompt(
@@ -127,8 +135,19 @@ class ObservabilityClient:
                 type="text",
                 label=self.settings.prompt_label,
             )
-            return prompt.compile(), getattr(prompt, "version", None)
+            compiled_prompt = prompt.compile()
+            prompt_version = getattr(prompt, "version", None)
+            if ttl_seconds:
+                self._system_prompt_cache = (
+                    compiled_prompt,
+                    prompt_version,
+                    now + ttl_seconds,
+                )
+            return compiled_prompt, prompt_version
         except Exception:
+            if self._system_prompt_cache is not None:
+                cached_prompt, cached_version, _ = self._system_prompt_cache
+                return cached_prompt, cached_version
             return DEFAULT_SYSTEM_PROMPT, None
 
     def _get_langfuse_client(self) -> Any:

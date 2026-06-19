@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -41,10 +42,56 @@ MAX_GRAPH_LLM_CALLS = 5
 CATALOG_RAG_CANDIDATE_LIMIT = 8
 POLICY_DOMAINS = {"clinical_policy", "admin_policy", "compliance"}
 POLICY_DOCUMENT_TYPES = {"policy", "sop", "pathway", "guideline"}
+FACT_QUERY_TERMS = {
+    "rent_amount": ("rent", "rental", "how much", "amount"),
+    "deposit_amount": ("deposit", "security deposit"),
+    "property_address": ("address", "property address", "premises"),
+}
 
 
 def estimate_tokens(text: str) -> int:
     return max(1, int(len(text.split()) * 1.3)) if text else 0
+
+
+def _elapsed_ms(started: float) -> int:
+    return int((time.perf_counter() - started) * 1000)
+
+
+def _add_timing(timing: dict[str, int], key: str, elapsed_ms: int) -> None:
+    timing[key] = timing.get(key, 0) + elapsed_ms
+
+
+def _add_tool_timing(performance: dict[str, Any], guidance: list[dict[str, Any]]) -> None:
+    tool_timings = performance.setdefault("tool_timings", [])
+    for item in guidance:
+        timing = item.get("timing_ms")
+        if not isinstance(timing, dict):
+            continue
+        tool_timings.append(
+            {
+                "tool": item.get("tool"),
+                "catalog_ms": int(timing.get("catalog_ms", 0)),
+                "retrieval_search_ms": int(timing.get("retrieval_search_ms", 0)),
+                "embedding_ms": int(timing.get("embedding_ms", 0)),
+                "opensearch_ms": int(timing.get("opensearch_ms", 0)),
+                "neighbor_ms": int(timing.get("neighbor_ms", 0)),
+                "vector_hits": int(timing.get("vector_hits", 0)),
+                "keyword_hits": int(timing.get("keyword_hits", 0)),
+                "neighbor_hits": int(timing.get("neighbor_hits", 0)),
+                "returned_hits": int(timing.get("returned_hits", 0)),
+                "access_filter_ms": int(timing.get("access_filter_ms", 0)),
+                "total_ms": int(timing.get("total_ms", 0)),
+            }
+        )
+        for key in (
+            "catalog_ms",
+            "retrieval_search_ms",
+            "embedding_ms",
+            "opensearch_ms",
+            "neighbor_ms",
+            "access_filter_ms",
+        ):
+            _add_timing(performance, key, int(timing.get(key, 0)))
 
 
 def _message_text(message: Any) -> str:
@@ -173,6 +220,7 @@ class GraphAgentResult:
     tools_used: list[str]
     tool_context: str
     catalog_guidance: list[dict[str, Any]] = field(default_factory=list)
+    performance: dict[str, Any] = field(default_factory=dict)
 
 
 class KnowledgeAgent:
@@ -197,6 +245,7 @@ class KnowledgeAgent:
         self.audit = HealthcareAuditLogger()
         self.tools = build_agent_tools(retrieval, documents)
         self._llm: Any | None = None
+        self._llm_error: str | None = None
 
     def answer(
         self,
@@ -206,19 +255,27 @@ class KnowledgeAgent:
         user_context: HealthcareUserContext | None = None,
     ) -> AgentResult:
         started = time.perf_counter()
+        performance: dict[str, Any] = {}
         session_id = session_id or uuid.uuid4().hex
         user_context = user_context or HealthcareUserContext(user_id=user_id)
         redaction = self.redactor.redact(query)
         safe_query = redaction.redacted_text
+        history_started = time.perf_counter()
         prior_messages = self.history.load_messages(user_id, session_id)
+        performance["history_load_ms"] = _elapsed_ms(history_started)
         history_context = build_history_context(prior_messages, self.settings.max_history_chars)
 
-        with self.observability.chat_trace(
+        trace_create_started = time.perf_counter()
+        trace_context = self.observability.chat_trace(
             user_id=user_id,
             session_id=session_id,
             query=safe_query,
             metadata={"roles": list(user_context.roles), "departments": list(user_context.departments)},
-        ) as trace:
+        )
+        performance["langfuse_trace_create_ms"] = _elapsed_ms(trace_create_started)
+        trace_enter_started = time.perf_counter()
+        with trace_context as trace:
+            performance["langfuse_trace_enter_ms"] = _elapsed_ms(trace_enter_started)
             trace_id = trace.trace_id
             healthcare_tools = build_healthcare_agent_tools(
                 retrieval=self.retrieval,
@@ -230,8 +287,12 @@ class KnowledgeAgent:
             original_tools = self.tools
             try:
                 self.tools = original_tools + healthcare_tools
+                prompt_started = time.perf_counter()
                 system_prompt, prompt_version = self.observability.system_prompt()
+                performance["langfuse_prompt_ms"] = _elapsed_ms(prompt_started)
+                safety_started = time.perf_counter()
                 initial_safety = self.safety.assess(safe_query, sources=[])
+                performance["initial_safety_ms"] = _elapsed_ms(safety_started)
                 graph_result = self._generate_agent_response(
                     system_prompt=system_prompt,
                     history_context=history_context,
@@ -244,12 +305,15 @@ class KnowledgeAgent:
                 sources = graph_result.sources
                 tools_used = graph_result.tools_used
                 catalog_guidance = graph_result.catalog_guidance
+                performance.update(graph_result.performance)
                 input_tokens = estimate_tokens(
                     "\n".join([system_prompt, history_context, graph_result.tool_context, query])
                 )
                 output_tokens = estimate_tokens(answer)
                 latency_ms = int((time.perf_counter() - started) * 1000)
+                final_safety_started = time.perf_counter()
                 safety_assessment = self.safety.assess(safe_query, sources)
+                performance["final_safety_ms"] = _elapsed_ms(final_safety_started)
                 audit_event = self.audit.log_chat_event(
                     user=user_context,
                     session_id=session_id,
@@ -261,28 +325,41 @@ class KnowledgeAgent:
                     token_usage={"input_tokens": input_tokens, "output_tokens": output_tokens},
                 )
 
-                self.history.save_message(user_id, session_id, ChatMessage(role="user", content=query))
-                self.history.save_message(
-                    user_id,
-                    session_id,
-                    ChatMessage(
-                        role="assistant",
-                        content=answer,
-                        metadata={
-                            "sources": sources,
-                            "tools_used": tools_used,
-                            "input_tokens": input_tokens,
-                            "output_tokens": output_tokens,
-                            "latency_ms": latency_ms,
-                            "trace_id": trace_id,
-                            "prompt_version": prompt_version,
-                            "safety": safety_assessment.as_dict(),
-                            "phi_redaction": redaction.findings,
-                            "audit_event": audit_event,
-                            "catalog_guidance": catalog_guidance,
-                        },
-                    ),
+                history_save_started = time.perf_counter()
+                user_message = ChatMessage(role="user", content=query)
+                assistant_message = ChatMessage(
+                    role="assistant",
+                    content=answer,
+                    metadata={
+                        "sources": sources,
+                        "tools_used": tools_used,
+                        "input_tokens": input_tokens,
+                        "output_tokens": output_tokens,
+                        "latency_ms": latency_ms,
+                        "trace_id": trace_id,
+                        "prompt_version": prompt_version,
+                        "safety": safety_assessment.as_dict(),
+                        "phi_redaction": redaction.findings,
+                        "audit_event": audit_event,
+                        "catalog_guidance": catalog_guidance,
+                        "llm_error": self._llm_error,
+                        "performance": performance,
+                    },
                 )
+                if self.settings.chat_background_history_save_enabled:
+                    performance["history_save_ms"] = 0
+                    performance["history_save_background"] = True
+                    latency_ms = _elapsed_ms(started)
+                    performance["total_ms"] = latency_ms
+                    assistant_message.metadata["latency_ms"] = latency_ms
+                    self._persist_history(user_id, session_id, user_message, assistant_message)
+                else:
+                    self._persist_history(user_id, session_id, user_message, assistant_message)
+                    performance["history_save_ms"] = _elapsed_ms(history_save_started)
+                    performance["history_save_background"] = False
+                    latency_ms = _elapsed_ms(started)
+                    performance["total_ms"] = latency_ms
+                    assistant_message.metadata["latency_ms"] = latency_ms
                 trace.update(
                     output={"answer": answer, "sources": sources},
                     metadata={
@@ -293,6 +370,8 @@ class KnowledgeAgent:
                         "safety": safety_assessment.as_dict(),
                         "prompt_version": prompt_version,
                         "catalog_guidance": catalog_guidance,
+                        "llm_error": self._llm_error,
+                        "performance": performance,
                     },
                 )
             finally:
@@ -313,6 +392,8 @@ class KnowledgeAgent:
                 "phi_redaction": redaction.findings,
                 "audit_event": audit_event,
                 "catalog_guidance": catalog_guidance,
+                "llm_error": self._llm_error,
+                "performance": performance,
             },
         )
 
@@ -325,11 +406,47 @@ class KnowledgeAgent:
                     return f"Tool {name} failed: {exc}"
         return f"Tool {name} is not registered."
 
+    def _persist_history(
+        self,
+        user_id: str,
+        session_id: str,
+        user_message: ChatMessage,
+        assistant_message: ChatMessage,
+    ) -> None:
+        if not self.settings.chat_background_history_save_enabled:
+            self._save_history_messages(user_id, session_id, user_message, assistant_message)
+            return
+
+        thread = threading.Thread(
+            target=self._save_history_messages,
+            args=(user_id, session_id, user_message, assistant_message),
+            daemon=True,
+        )
+        thread.start()
+
+    def _save_history_messages(
+        self,
+        user_id: str,
+        session_id: str,
+        user_message: ChatMessage,
+        assistant_message: ChatMessage,
+    ) -> None:
+        try:
+            self.history.save_message(user_id, session_id, user_message)
+            self.history.save_message(user_id, session_id, assistant_message)
+        except Exception:
+            return
+
     def _retrieval_hits_for_tool(
         self, name: str, query: str, user_context: HealthcareUserContext
     ) -> tuple[list[RetrievalHit], dict[str, Any]]:
+        started = time.perf_counter()
+        catalog_started = time.perf_counter()
         candidate_keys = self._catalog_candidate_keys(name, query, user_context)
+        catalog_ms = _elapsed_ms(catalog_started)
+        retrieval_started = time.perf_counter()
         hits = self.retrieval.search(query, document_keys=candidate_keys or None)
+        retrieval_search_ms = _elapsed_ms(retrieval_started)
         if name == "policy_search":
             filtered: list[RetrievalHit] = []
             for hit in hits:
@@ -338,6 +455,10 @@ class KnowledgeAgent:
                 if domain in POLICY_DOMAINS or document_type in POLICY_DOCUMENT_TYPES:
                     filtered.append(hit)
             hits = filtered or hits
+        access_started = time.perf_counter()
+        filtered_hits = self.access.filter_hits(user_context, hits)
+        access_filter_ms = _elapsed_ms(access_started)
+        retrieval_timing = dict(getattr(self.retrieval, "last_timing_ms", {}) or {})
         guidance = {
             "tool": name,
             "query": query,
@@ -345,8 +466,22 @@ class KnowledgeAgent:
             "candidate_count": len(candidate_keys),
             "catalog_filter_applied": bool(candidate_keys),
             "fallback_to_broad_search": not bool(candidate_keys),
+            "timing_ms": {
+                "catalog_ms": catalog_ms,
+                "retrieval_search_ms": retrieval_search_ms,
+                "embedding_ms": int(retrieval_timing.get("embedding_ms", 0)),
+                "opensearch_ms": int(retrieval_timing.get("opensearch_ms", 0)),
+                "retrieval_total_ms": int(retrieval_timing.get("total_ms", 0)),
+                "neighbor_ms": int(retrieval_timing.get("neighbor_ms", 0)),
+                "vector_hits": int(retrieval_timing.get("vector_hits", 0)),
+                "keyword_hits": int(retrieval_timing.get("keyword_hits", 0)),
+                "neighbor_hits": int(retrieval_timing.get("neighbor_hits", 0)),
+                "returned_hits": int(retrieval_timing.get("returned_hits", 0)),
+                "access_filter_ms": access_filter_ms,
+                "total_ms": _elapsed_ms(started),
+            },
         }
-        return self.access.filter_hits(user_context, hits), guidance
+        return filtered_hits, guidance
 
     def _catalog_candidate_keys(
         self, name: str, query: str, user_context: HealthcareUserContext
@@ -430,28 +565,61 @@ class KnowledgeAgent:
         user_context: HealthcareUserContext,
         initial_safety: dict[str, Any],
     ) -> GraphAgentResult:
+        performance: dict[str, Any] = {}
         user_prompt = self._graph_user_prompt(
             history_context=history_context,
             query=query,
             initial_safety=initial_safety,
         )
-        llm = self._get_llm()
-        if llm is None:
-            return self._offline_graph_answer(query=query, user_context=user_context)
+        if self.settings.exact_fact_answers_enabled and self._should_try_exact_fact_answer(query):
+            exact_started = time.perf_counter()
+            exact_result = self._call_exact_fact_rag_agent(query=query, user_context=user_context)
+            if exact_result is not None:
+                exact_result.performance.update(performance)
+                exact_result.performance["agent_execution_ms"] = _elapsed_ms(exact_started)
+                return exact_result
 
+        llm_setup_started = time.perf_counter()
+        llm = self._get_llm()
+        performance["llm_setup_ms"] = _elapsed_ms(llm_setup_started)
+        if llm is None:
+            result = self._offline_graph_answer(query=query, user_context=user_context)
+            result.performance.update(performance)
+            return result
+
+        callbacks_started = time.perf_counter()
         callbacks = self.observability.callbacks()
+        performance["langfuse_callbacks_ms"] = _elapsed_ms(callbacks_started)
         config = {"callbacks": callbacks} if callbacks else None
         try:
-            return self._call_langgraph_agent(
-                llm=llm,
-                system_prompt=system_prompt,
-                user_prompt=user_prompt,
-                original_query=query,
-                user_context=user_context,
-                config=config,
-            )
-        except Exception:
+            agent_started = time.perf_counter()
+            if self._should_use_fast_rag(query):
+                result = self._call_fast_rag_agent(
+                    llm=llm,
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    original_query=query,
+                    user_context=user_context,
+                    config=config,
+                )
+                result.performance["agent_mode"] = "fast_rag"
+            else:
+                result = self._call_langgraph_agent(
+                    llm=llm,
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    original_query=query,
+                    user_context=user_context,
+                    config=config,
+                )
+                result.performance["agent_mode"] = "langgraph"
+            result.performance.update(performance)
+            result.performance["agent_execution_ms"] = _elapsed_ms(agent_started)
+            return result
+        except Exception as exc:
+            self._llm_error = f"LLM graph call failed: {type(exc).__name__}: {exc}"
             try:
+                direct_started = time.perf_counter()
                 response = self._invoke_model(
                     llm,
                     [_make_system_message(system_prompt), _make_human_message(user_prompt)],
@@ -462,21 +630,161 @@ class KnowledgeAgent:
                     sources=[],
                     tools_used=[],
                     tool_context="No graph tools were executed.",
+                    performance={
+                        **performance,
+                        "agent_mode": "direct_fallback",
+                        "llm_direct_answer_ms": _elapsed_ms(direct_started),
+                    },
                 )
-            except Exception:
-                return self._offline_graph_answer(query=query, user_context=user_context)
+            except Exception as exc:
+                self._llm_error = f"LLM direct call failed: {type(exc).__name__}: {exc}"
+                result = self._offline_graph_answer(query=query, user_context=user_context)
+                result.performance.update(performance)
+                return result
 
     def _offline_graph_answer(
         self, *, query: str, user_context: HealthcareUserContext
     ) -> GraphAgentResult:
+        started = time.perf_counter()
         tool_output, sources, catalog_guidance = self._run_graph_tool("rag_search", query, user_context)
         tool_context = "RAG search results:\n" + tool_output
+        performance: dict[str, Any] = {"agent_mode": "offline_rag"}
+        _add_tool_timing(performance, catalog_guidance)
+        performance["agent_execution_ms"] = _elapsed_ms(started)
         return GraphAgentResult(
             answer=self._offline_answer(query=query, tool_context=tool_context),
             sources=sources,
             tools_used=["rag_search"],
             tool_context=tool_context,
             catalog_guidance=catalog_guidance,
+            performance=performance,
+        )
+
+    def _should_try_exact_fact_answer(self, query: str) -> bool:
+        lowered = query.lower()
+        return any(term in lowered for terms in FACT_QUERY_TERMS.values() for term in terms)
+
+    def _call_exact_fact_rag_agent(
+        self, *, query: str, user_context: HealthcareUserContext
+    ) -> GraphAgentResult | None:
+        tool_output, sources, catalog_guidance = self._run_graph_tool("rag_search", query, user_context)
+        answer = self._answer_from_source_facts(query, sources)
+        if answer is None:
+            return None
+        performance: dict[str, Any] = {
+            "agent_mode": "exact_fact",
+            "llm_call_count": 0,
+            "llm_final_ms": 0,
+        }
+        _add_tool_timing(performance, catalog_guidance)
+        return GraphAgentResult(
+            answer=answer,
+            sources=_dedupe_sources(sources),
+            tools_used=["rag_search"],
+            tool_context="RAG search results:\n" + tool_output,
+            catalog_guidance=catalog_guidance,
+            performance=performance,
+        )
+
+    def _answer_from_source_facts(self, query: str, sources: list[dict[str, Any]]) -> str | None:
+        lowered = query.lower()
+        requested_fields = [
+            field
+            for field, markers in FACT_QUERY_TERMS.items()
+            if any(marker in lowered for marker in markers)
+        ]
+        if not requested_fields:
+            return None
+
+        answers: list[str] = []
+        citations: list[str] = []
+        for source in sources:
+            metadata = source.get("metadata") or {}
+            facts = metadata.get("facts") if isinstance(metadata, dict) else None
+            if not isinstance(facts, dict):
+                continue
+            for field in requested_fields:
+                value = facts.get(field)
+                if not value:
+                    continue
+                label = {
+                    "rent_amount": "rent amount",
+                    "deposit_amount": "deposit amount",
+                    "property_address": "property address",
+                }.get(field, field.replace("_", " "))
+                answers.append(f"The {label} is {value}.")
+                title = source.get("title") or "source"
+                uri = source.get("uri") or ""
+                citations.append(f"{title} ({uri})" if uri else str(title))
+            if answers:
+                break
+
+        if not answers:
+            return None
+        citation_text = "; ".join(dict.fromkeys(citations))
+        return " ".join(answers) + (f"\n\nSource: {citation_text}" if citation_text else "")
+
+    def _should_use_fast_rag(self, query: str) -> bool:
+        if not self.settings.chat_fast_rag_enabled:
+            return False
+        terms = [term for term in query.split() if len(term.strip(".,?!:;()[]{}")) >= 3]
+        if len(terms) < self.settings.chat_fast_rag_min_query_terms:
+            return False
+        lowered = query.lower()
+        non_rag_markers = {
+            "calendar",
+            "rota",
+            "shift",
+            "formulary",
+            "drug",
+            "dose",
+            "dosage",
+            "table",
+            "csv",
+            "row",
+        }
+        return not any(marker in lowered for marker in non_rag_markers)
+
+    def _call_fast_rag_agent(
+        self,
+        *,
+        llm: Any,
+        system_prompt: str,
+        user_prompt: str,
+        original_query: str,
+        user_context: HealthcareUserContext,
+        config: dict[str, Any] | None,
+    ) -> GraphAgentResult:
+        started = time.perf_counter()
+        tool_output, sources, catalog_guidance = self._run_graph_tool(
+            "rag_search", original_query, user_context
+        )
+        tool_context = "RAG search results:\n" + tool_output
+        answer_prompt = (
+            f"{user_prompt}\n\n"
+            "Retrieved knowledge context:\n"
+            f"{tool_context}\n\n"
+            "Answer the user using the retrieved context. Include citations when sources are present. "
+            "If the retrieved context is insufficient, say what is missing."
+        )
+        llm_started = time.perf_counter()
+        response = self._invoke_model(
+            llm,
+            [_make_system_message(system_prompt), _make_human_message(answer_prompt)],
+            config,
+        )
+        performance: dict[str, Any] = {
+            "llm_final_ms": _elapsed_ms(llm_started),
+            "agent_execution_ms": _elapsed_ms(started),
+        }
+        _add_tool_timing(performance, catalog_guidance)
+        return GraphAgentResult(
+            answer=_message_text(response),
+            sources=_dedupe_sources(sources),
+            tools_used=["rag_search"],
+            tool_context=tool_context,
+            catalog_guidance=catalog_guidance,
+            performance=performance,
         )
 
     def _invoke_model(self, model: Any, messages: list[Any], config: dict[str, Any] | None) -> Any:
@@ -552,19 +860,30 @@ class KnowledgeAgent:
         sources: list[dict[str, Any]] = []
         tool_outputs: list[str] = []
         catalog_guidance: list[dict[str, Any]] = []
+        performance: dict[str, Any] = {"llm_call_count": 0}
+        max_llm_calls = max(1, self.settings.max_graph_llm_calls or MAX_GRAPH_LLM_CALLS)
 
-        for _ in range(MAX_GRAPH_LLM_CALLS):
+        for _ in range(max_llm_calls):
+            llm_started = time.perf_counter()
             response = self._invoke_model(bound_llm, messages, config)
+            llm_ms = _elapsed_ms(llm_started)
+            performance["llm_call_count"] = int(performance["llm_call_count"]) + 1
             messages.append(response)
             tool_calls = _message_tool_calls(response)
             if not tool_calls:
+                if tools_used:
+                    _add_timing(performance, "llm_final_ms", llm_ms)
+                else:
+                    _add_timing(performance, "llm_direct_answer_ms", llm_ms)
                 return GraphAgentResult(
                     answer=_message_text(response),
                     sources=_dedupe_sources(sources),
                     tools_used=tools_used,
                     tool_context="\n\n".join(tool_outputs) or "No graph tools were executed.",
                     catalog_guidance=catalog_guidance,
+                    performance=performance,
                 )
+            _add_timing(performance, "llm_tool_choice_ms", llm_ms)
             for tool_call in tool_calls:
                 name = _tool_call_name(tool_call)
                 query = _tool_query(_tool_call_args(tool_call), original_query)
@@ -580,6 +899,7 @@ class KnowledgeAgent:
                     tools_used.append(name)
                 sources.extend(new_sources)
                 catalog_guidance.extend(new_guidance)
+                _add_tool_timing(performance, new_guidance)
                 tool_outputs.append(f"{name}({query}):\n{output}")
                 messages.append(_make_tool_message(output, tool_call_id))
 
@@ -589,7 +909,10 @@ class KnowledgeAgent:
                 "tool results already available. Do not call more tools."
             )
         )
+        llm_started = time.perf_counter()
         response = self._invoke_model(llm, messages, config)
+        _add_timing(performance, "llm_final_ms", _elapsed_ms(llm_started))
+        performance["llm_call_count"] = int(performance["llm_call_count"]) + 1
         messages.append(response)
         return GraphAgentResult(
             answer=_message_text(response),
@@ -597,6 +920,7 @@ class KnowledgeAgent:
             tools_used=tools_used,
             tool_context="\n\n".join(tool_outputs) or "No graph tools were executed.",
             catalog_guidance=catalog_guidance,
+            performance=performance,
         )
 
     def _graph_state_result(self, state: dict[str, Any]) -> GraphAgentResult:
@@ -609,6 +933,7 @@ class KnowledgeAgent:
             tool_context="\n\n".join(state.get("tool_outputs", []))
             or "No graph tools were executed.",
             catalog_guidance=list(state.get("catalog_guidance", [])),
+            performance=dict(state.get("performance", {})),
         )
 
     def _get_llm(self) -> Any | None:
@@ -627,7 +952,9 @@ class KnowledgeAgent:
                 timeout=60,
                 max_retries=2,
             )
-        except Exception:
+            self._llm_error = None
+        except Exception as exc:
+            self._llm_error = f"{type(exc).__name__}: {exc}"
             self._llm = None
         return self._llm
 
@@ -643,6 +970,7 @@ class KnowledgeAgent:
             f"{context_preview}\n\n"
             "This fallback answer was generated without an LLM call because the Azure OpenAI "
             "configuration was unavailable."
+            f"\n\nAzure OpenAI diagnostic: {self._llm_error or 'unknown configuration error'}"
         )
 
     def registered_tool_names(self) -> list[str]:

@@ -6,16 +6,16 @@
       "Effect": "Allow",
       "Action": "secretsmanager:GetSecretValue",
       "Resource": [
-        "arn:aws:secretsmanager:<region>:<account-id>:secret:/dstrmaysam-healthcare-knowledge-agent/dev/app-*",
-        "arn:aws:secretsmanager:<region>:<account-id>:secret:/dstrmaysam-healthcare-knowledge-agent/dev/azure-openai-*",
-        "arn:aws:secretsmanager:<region>:<account-id>:secret:/dstrmaysam-healthcare-knowledge-agent/dev/langfuse-*"
+        "arn:aws:secretsmanager:eu-west-2:666127452756:secret:/dstrmaysam-healthcare-knowledge-agent/dev/app-*",
+        "arn:aws:secretsmanager:eu-west-2:666127452756:secret:/dstrmaysam-healthcare-knowledge-agent/dev/azure-openai-*",
+        "arn:aws:secretsmanager:eu-west-2:666127452756:secret:/dstrmaysam-healthcare-knowledge-agent/dev/langfuse-*"
       ]
     },
     {
       "Sid": "WriteAppUserSecret",
       "Effect": "Allow",
       "Action": "secretsmanager:PutSecretValue",
-      "Resource": "arn:aws:secretsmanager:<region>:<account-id>:secret:/dstrmaysam-healthcare-knowledge-agent/dev/app-*"
+      "Resource": "arn:aws:secretsmanager:eu-west-2:666127452756:secret:/dstrmaysam-healthcare-knowledge-agent/dev/app-*"
     },
     {
       "Sid": "ReadWriteKnowledgeBucket",
@@ -39,7 +39,7 @@
         "dynamodb:Query",
         "dynamodb:UpdateItem"
       ],
-      "Resource": "arn:aws:dynamodb:<region>:<account-id>:table/dstrmaysam-healthcare-knowledge-agent-dev"
+      "Resource": "arn:aws:dynamodb:eu-west-2:666127452756:table/dstrmaysam-healthcare-knowledge-agent-dev"
     },
     {
       "Sid": "OpenSearchServerlessAccess",
@@ -47,7 +47,7 @@
       "Action": [
         "aoss:APIAccessAll"
       ],
-      "Resource": "arn:aws:aoss:<region>:<account-id>:collection/<collection-id>"
+      "Resource": "arn:aws:aoss:eu-west-2:666127452756:collection/p5if6vfqygl1kxrcs568"
     }
   ]
 }

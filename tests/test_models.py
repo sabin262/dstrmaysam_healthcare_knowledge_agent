@@ -1,6 +1,6 @@
 import unittest
 
-from backend.app.models import LoginResponse, Source
+from backend.app.models import ChatResponse, LoginResponse, Source
 
 
 class ModelTests(unittest.TestCase):
@@ -24,6 +24,20 @@ class ModelTests(unittest.TestCase):
         self.assertEqual(response.roles, [])
         self.assertEqual(response.departments, [])
         self.assertFalse(response.password_change_required)
+
+    def test_chat_response_performance_defaults_for_compatibility(self):
+        response = ChatResponse(
+            session_id="session",
+            answer="Answer",
+            sources=[],
+            tools_used=[],
+            input_tokens=1,
+            output_tokens=1,
+            latency_ms=10,
+            trace_id="trace",
+        )
+
+        self.assertEqual(response.performance, {})
 
 
 if __name__ == "__main__":

@@ -21,7 +21,7 @@ class LoginResponse(BaseModel):
 
 class ChangePasswordRequest(BaseModel):
     current_password: str = Field(min_length=1)
-    new_password: str = Field(min_length=8)
+    new_password: str = Field(min_length=1)
 
 
 class ChatRequest(BaseModel):
@@ -48,6 +48,7 @@ class ChatResponse(BaseModel):
     trace_id: str
     safety: dict[str, Any] = Field(default_factory=dict)
     audit_event: dict[str, Any] = Field(default_factory=dict)
+    performance: dict[str, Any] = Field(default_factory=dict)
 
 
 class ChatSessionSummary(BaseModel):
@@ -70,7 +71,7 @@ class AdminUserSummary(BaseModel):
 
 class AdminUserCreateRequest(BaseModel):
     username: str = Field(min_length=1)
-    temporary_password: str = Field(min_length=8)
+    temporary_password: str = Field(min_length=1)
     roles: list[str]
     departments: list[str] = Field(default_factory=list)
 
@@ -81,4 +82,24 @@ class AdminUserUpdateRequest(BaseModel):
 
 
 class AdminPasswordResetRequest(BaseModel):
-    temporary_password: str = Field(min_length=8)
+    temporary_password: str = Field(min_length=1)
+
+
+class AdminDocumentUploadResponse(BaseModel):
+    key: str
+    uri: str
+    content_type: str
+    size_bytes: int
+
+
+class AdminIngestionResponse(BaseModel):
+    opensearch_index: str | None = None
+    previous_opensearch_index: str | None = None
+    force_reindex: bool = False
+    documents: list[dict[str, Any]] = Field(default_factory=list)
+    indexed_chunks: int = 0
+    total_chunks: int = 0
+    indexed_documents: int = 0
+    skipped_documents: int = 0
+    deleted_documents: int = 0
+    deleted_chunks: int = 0

@@ -17,7 +17,7 @@ except ModuleNotFoundError:
 def app_settings() -> AppSettings:
     return AppSettings(
         app_env="test",
-        aws_region="us-east-1",
+        aws_region="eu-west-2",
         secrets_stage="test",
         app_secret_name="/test/app",
         azure_openai_secret_name="/test/azure",
@@ -151,6 +151,23 @@ class UserManagementApiTests(unittest.TestCase):
         self.assertEqual(reset_response.status_code, 200)
         self.assertTrue(reset_response.json()["password_change_required"])
 
+    def test_short_temporary_password_returns_domain_error_not_validation_422(self):
+        admin_headers = self.headers_for("admin", "adminpass1")
+
+        response = self.client.post(
+            "/admin/users",
+            headers=admin_headers,
+            json={
+                "username": "shortpass",
+                "temporary_password": "short",
+                "roles": ["staff"],
+                "departments": [],
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["detail"], "Password must be at least 8 characters")
+
     def test_password_change_required_user_is_blocked_until_password_change(self):
         self.auth.create_user("doctor1", "temporary1", ["doctor"], ["cardiology"])
         headers = self.headers_for("doctor1", "temporary1")
@@ -166,6 +183,98 @@ class UserManagementApiTests(unittest.TestCase):
         )
         self.assertEqual(change_response.status_code, 200)
         self.assertFalse(change_response.json()["password_change_required"])
+
+
+class FakeDocumentStore:
+    def __init__(self):
+        self.uploads = []
+
+    def upload_document(self, key: str, data: bytes, content_type: str) -> None:
+        self.uploads.append({"key": key, "data": data, "content_type": content_type})
+
+
+class FakeIngestionJob:
+    calls = 0
+
+    def __init__(self, settings, secret_provider):
+        self.settings = settings
+        self.secret_provider = secret_provider
+
+    def run(self):
+        FakeIngestionJob.calls += 1
+        return {
+            "documents": [{"key": "raw/policy.md", "title": "policy.md"}],
+            "indexed_chunks": 3,
+        }
+
+
+class AdminDocumentApiTests(unittest.TestCase):
+    @unittest.skipIf(TestClient is None, "FastAPI test dependencies are not installed")
+    def setUp(self):
+        self.settings = app_settings()
+        self.auth = make_auth_service()
+        self.documents = FakeDocumentStore()
+        FakeIngestionJob.calls = 0
+        self.patches = [
+            mock.patch.object(main, "get_auth_service", lambda: self.auth),
+            mock.patch.object(main, "get_settings", lambda: self.settings),
+            mock.patch.object(main, "get_document_store", lambda: self.documents),
+            mock.patch.object(main, "get_secret_provider", lambda: self.auth.secret_provider),
+            mock.patch.object(main, "IngestionJob", FakeIngestionJob),
+        ]
+        for patch in self.patches:
+            patch.start()
+        self.client = TestClient(main.app)
+
+    def tearDown(self):
+        for patch in reversed(self.patches):
+            patch.stop()
+
+    def headers_for(self, username: str, password: str) -> dict[str, str]:
+        token = self.auth.login(username, password).access_token
+        return {"Authorization": f"Bearer {token}"}
+
+    def test_admin_can_upload_document_to_raw_s3_prefix(self):
+        response = self.client.post(
+            "/admin/documents/upload",
+            headers=self.headers_for("admin", "adminpass1"),
+            files={"file": ("Clinical Policy.md", b"# Policy", "text/markdown")},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["key"], "raw/Clinical_Policy.md")
+        self.assertEqual(self.documents.uploads[0]["key"], "raw/Clinical_Policy.md")
+        self.assertEqual(self.documents.uploads[0]["data"], b"# Policy")
+
+    def test_non_admin_cannot_upload_document(self):
+        response = self.client.post(
+            "/admin/documents/upload",
+            headers=self.headers_for("staff", "staffpass1"),
+            files={"file": ("policy.md", b"# Policy", "text/markdown")},
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(self.documents.uploads, [])
+
+    def test_unsupported_upload_extension_returns_400(self):
+        response = self.client.post(
+            "/admin/documents/upload",
+            headers=self.headers_for("admin", "adminpass1"),
+            files={"file": ("malware.exe", b"nope", "application/octet-stream")},
+        )
+
+        self.assertEqual(response.status_code, 400)
+
+    def test_admin_can_run_ingestion(self):
+        response = self.client.post(
+            "/admin/documents/ingest",
+            headers=self.headers_for("admin", "adminpass1"),
+            json={},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["indexed_chunks"], 3)
+        self.assertEqual(FakeIngestionJob.calls, 1)
 
 
 if __name__ == "__main__":

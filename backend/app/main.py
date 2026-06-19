@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from pathlib import PurePath
+import re
 
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, File, HTTPException, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
@@ -17,7 +19,10 @@ from .auth import (
 from .config import AppSettings
 from .healthcare import HealthcareUserContext
 from .history import create_chat_history_repository
+from .ingest import IngestionJob
 from .models import (
+    AdminDocumentUploadResponse,
+    AdminIngestionResponse,
     AdminPasswordResetRequest,
     AdminUserCreateRequest,
     AdminUserSummary,
@@ -35,6 +40,9 @@ from .observability import ObservabilityClient
 from .retrieval import RetrievalService
 from .secrets import SecretProvider
 from .storage import DocumentStore
+
+
+SUPPORTED_UPLOAD_EXTENSIONS = {".pdf", ".docx", ".txt", ".md", ".csv"}
 
 
 @lru_cache
@@ -116,6 +124,25 @@ def _admin_user_response(user) -> AdminUserSummary:
         departments=user.departments,
         password_change_required=user.password_change_required,
     )
+
+
+def _safe_upload_filename(filename: str | None) -> str:
+    raw_name = PurePath(filename or "").name.strip()
+    name = re.sub(r"[^A-Za-z0-9._-]+", "_", raw_name).strip("._-")
+    if not name:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Uploaded file must have a filename")
+    suffix = PurePath(name).suffix.lower()
+    if suffix not in SUPPORTED_UPLOAD_EXTENSIONS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Supported file types are pdf, docx, txt, md, and csv",
+        )
+    return name
+
+
+def _raw_document_key(filename: str) -> str:
+    prefix = get_settings().s3_raw_prefix.strip("/")
+    return f"{prefix}/{filename}" if prefix else filename
 
 
 def current_user_context(
@@ -260,6 +287,54 @@ def reset_admin_user_password(
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
 
+@app.post("/admin/documents/upload", response_model=AdminDocumentUploadResponse)
+async def upload_admin_document(
+    file: UploadFile = File(...),
+    user: HealthcareUserContext = Depends(admin_user_context),
+) -> AdminDocumentUploadResponse:
+    filename = _safe_upload_filename(file.filename)
+    data = await file.read()
+    if not data:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Uploaded file is empty")
+    key = _raw_document_key(filename)
+    content_type = file.content_type or "application/octet-stream"
+    try:
+        get_document_store().upload_document(key, data, content_type)
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+    return AdminDocumentUploadResponse(
+        key=key,
+        uri=f"s3://{get_settings().s3_bucket}/{key}",
+        content_type=content_type,
+        size_bytes=len(data),
+    )
+
+
+@app.post("/admin/documents/ingest", response_model=AdminIngestionResponse)
+def ingest_admin_documents(
+    user: HealthcareUserContext = Depends(admin_user_context),
+) -> AdminIngestionResponse:
+    try:
+        result = IngestionJob(get_settings(), get_secret_provider()).run()
+        document_store = get_document_store()
+        if hasattr(document_store, "invalidate_manifest_cache"):
+            document_store.invalidate_manifest_cache()
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+    return AdminIngestionResponse(
+        opensearch_index=result.get("opensearch_index"),
+        previous_opensearch_index=result.get("previous_opensearch_index"),
+        force_reindex=bool(result.get("force_reindex", False)),
+        documents=list(result.get("documents", [])),
+        indexed_chunks=int(result.get("indexed_chunks", 0)),
+        total_chunks=int(result.get("total_chunks", 0)),
+        indexed_documents=int(result.get("indexed_documents", 0)),
+        skipped_documents=int(result.get("skipped_documents", 0)),
+        deleted_documents=int(result.get("deleted_documents", 0)),
+        deleted_chunks=int(result.get("deleted_chunks", 0)),
+    )
+
+
 @app.post("/chat", response_model=ChatResponse)
 def chat(request: ChatRequest, user: HealthcareUserContext = Depends(active_user_context)) -> ChatResponse:
     result = get_agent().answer(
@@ -279,6 +354,7 @@ def chat(request: ChatRequest, user: HealthcareUserContext = Depends(active_user
         trace_id=result.trace_id,
         safety=result.metadata.get("safety", {}),
         audit_event=result.metadata.get("audit_event", {}),
+        performance=result.metadata.get("performance", {}),
     )
 
 

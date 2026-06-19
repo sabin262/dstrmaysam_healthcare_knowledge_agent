@@ -118,8 +118,11 @@ class SecretProvider:
 
     def load_azure_openai(self) -> AzureOpenAISecrets:
         data = self.get_json(self.settings.azure_openai_secret_name)
-        required = ["endpoint", "api_key", "chat_deployment", "embedding_deployment"]
+        chat_deployment = self.settings.azure_openai_deployment or str(data.get("chat_deployment", ""))
+        required = ["endpoint", "api_key", "embedding_deployment"]
         missing = [key for key in required if not data.get(key)]
+        if not chat_deployment:
+            missing.append("chat_deployment or AZURE_OPENAI_DEPLOYMENT")
         if missing:
             raise SecretProviderError(
                 f"Azure OpenAI secret is missing required keys: {', '.join(missing)}"
@@ -128,7 +131,7 @@ class SecretProvider:
             endpoint=str(data["endpoint"]),
             api_key=str(data["api_key"]),
             api_version=str(data.get("api_version", "2025-04-01-preview")),
-            chat_deployment=str(data["chat_deployment"]),
+            chat_deployment=chat_deployment,
             embedding_deployment=str(data["embedding_deployment"]),
         )
 
