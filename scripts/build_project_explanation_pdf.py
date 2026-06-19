@@ -176,7 +176,7 @@ def header_footer(canvas, doc):
     width, height = LETTER
     canvas.setFont("Helvetica-Bold", 8)
     canvas.setFillColor(MUTED)
-    canvas.drawString(inch, height - 0.55 * inch, "Internal Company Knowledge Assistant")
+    canvas.drawString(inch, height - 0.55 * inch, "Dstrmaysam Healthcare Knowledge Agent")
     canvas.setStrokeColor(colors.HexColor("#D9E2EC"))
     canvas.setLineWidth(0.5)
     canvas.line(inch, height - 0.64 * inch, width - inch, height - 0.64 * inch)
@@ -302,7 +302,7 @@ def code_block(text: str):
 
 def build_story():
     story = []
-    story.extend([p("Internal Company Knowledge Assistant", "title")])
+    story.extend([p("Dstrmaysam Healthcare Knowledge Agent", "title")])
     story.append(
         p(
             "Detailed project explanation for the FastAPI, Streamlit, LangChain, Azure OpenAI, AWS, Langfuse, and RAGAS MVP.",
@@ -354,12 +354,12 @@ def build_story():
     story.extend(section("1. Executive Overview"))
     story.append(
         p(
-            "The Internal Company Knowledge Assistant is a containerized application that lets employees ask questions against company knowledge. It combines a Streamlit chat interface, a FastAPI backend, a LangChain agent, Azure OpenAI, AWS storage and hosting services, Langfuse observability, and RAGAS evaluation.",
+            "The Dstrmaysam Healthcare Knowledge Agent is a containerized application that lets employees ask questions against company knowledge. It combines a Streamlit chat interface, a FastAPI backend, a LangChain agent, Azure OpenAI, AWS storage and hosting services, Langfuse observability, and RAGAS evaluation.",
         )
     )
     story.append(
         p(
-            "The assistant is intentionally built as an MVP with production-shaped boundaries. The frontend stays thin and user-focused. The backend owns authentication, secret loading, retrieval, tool execution, model calls, chat persistence, and tracing. AWS services provide the operational foundation: S3 for documents, OpenSearch Serverless for vector search, DynamoDB for chat history, ECR/ECS for containers, CloudWatch for logs, and Secrets Manager for every secret value.",
+            "The assistant is intentionally built as an MVP with deployment-shaped boundaries for AWS dev. The frontend stays thin and user-focused. The backend owns authentication, secret loading, retrieval, tool execution, model calls, chat persistence, and tracing. AWS services provide the operational foundation: S3 for documents, OpenSearch Serverless for vector search, DynamoDB for chat history, ECR/ECS for containers, CloudWatch for logs, and Secrets Manager for every secret value.",
         )
     )
     story.append(
@@ -534,7 +534,7 @@ def build_story():
         label_detail(
             [
                 ("Local mode", "Uses an in-memory repository for development and tests."),
-                ("Production mode", "Uses DynamoDB with user_id as the partition key and sort_key for session/message records."),
+                ("AWS dev mode", "Uses DynamoDB with user_id as the partition key and sort_key for session/message records."),
                 ("Context control", "MAX_HISTORY_CHARS limits how much history is injected into the agent prompt."),
                 ("Long sessions", "Older messages are omitted with a summary marker once the history window becomes too large."),
             ]
@@ -551,9 +551,9 @@ def build_story():
         table(
             [
                 ["Secret name", "Contains", "Used by"],
-                ["/company-assistant/{stage}/app", "session_secret and auth_users password-hash map.", "FastAPI authentication service."],
-                ["/company-assistant/{stage}/azure-openai", "endpoint, api_key, api_version, chat deployment, embedding deployment.", "LangChain chat and embedding clients."],
-                ["/company-assistant/{stage}/langfuse", "public key, secret key, base URL.", "Langfuse tracing and prompt management."],
+                ["/dstrmaysam-healthcare-knowledge-agent/{stage}/app", "session_secret and auth_users password-hash map.", "FastAPI authentication service."],
+                ["/dstrmaysam-healthcare-knowledge-agent/{stage}/azure-openai", "endpoint, api_key, api_version, chat deployment, embedding deployment.", "LangChain chat and embedding clients."],
+                ["/dstrmaysam-healthcare-knowledge-agent/{stage}/langfuse", "public key, secret key, base URL.", "Langfuse tracing and prompt management."],
             ],
             [2.25 * inch, 2.9 * inch, 1.35 * inch],
         )
@@ -561,7 +561,7 @@ def build_story():
     story.extend(
         callout(
             "Security note",
-            "The MVP uses simple login because it is achievable in the five-day scope. For production, the natural upgrade is Cognito, SSO/SAML, or the company's existing identity provider.",
+            "The MVP uses simple login because it is achievable in the five-day scope. For future production hardening, the natural upgrade is Cognito, SSO/SAML, or the company's existing identity provider.",
         )
     )
 
@@ -575,7 +575,7 @@ def build_story():
         label_detail(
             [
                 ("Tracing", "Records model calls, retrieval/tool behavior, latency, token usage, and trace IDs."),
-                ("Prompt versions", "The system prompt can be loaded from Langfuse using dev or production labels."),
+                ("Prompt versions", "The system prompt can be loaded from Langfuse using the dev label used by AWS dev deployment."),
                 ("Fallback prompt", "If Langfuse prompt retrieval fails, the backend uses a safe default system prompt."),
                 ("Demo value", "The trace ID links the UI response to backend behavior and model/tool execution details."),
             ]
@@ -601,7 +601,7 @@ def build_story():
         )
     )
 
-    story.extend(section("11. AWS Deployment Model"))
+    story.extend(section("11. AWS Dev Deployment Model"))
     story.append(
         p(
             "The target deployment is ECS Fargate. Backend and frontend images are built independently, pushed to ECR, and deployed as separate ECS services. An Application Load Balancer exposes the user interface and can route API traffic to the backend service. IAM task roles grant least-privilege access to the exact AWS resources needed.",
@@ -696,7 +696,7 @@ def build_story():
     story.extend(section("16. Final Summary"))
     story.append(
         p(
-            "This project is a strong five-day MVP because it demonstrates the full production shape of an internal knowledge assistant: containerized services, AWS hosting path, secure secret management, agentic tool use, RAG, persistent context, observability, prompt versioning, evaluation, and stress testing. The scaffold can run locally with development settings, then move toward production once AWS resources and live Azure OpenAI/Langfuse secrets are configured.",
+            "This project is a strong five-day MVP because it demonstrates the full AWS dev deployment shape of an internal knowledge assistant: containerized services, AWS hosting path, secure secret management, agentic tool use, RAG, persistent context, observability, prompt versioning, evaluation, and stress testing. The scaffold can run locally with development settings, then run against AWS dev once AWS resources and live Azure OpenAI/Langfuse secrets are configured, with future production hardening as a later step.",
         )
     )
     return story
@@ -711,7 +711,7 @@ def build_pdf() -> Path:
         rightMargin=inch,
         topMargin=0.82 * inch,
         bottomMargin=0.8 * inch,
-        title="Internal Company Knowledge Assistant Project Explanation",
+        title="Dstrmaysam Healthcare Knowledge Agent Project Explanation",
         author="Codex",
         subject="Detailed project explanation",
     )
@@ -727,4 +727,3 @@ STYLES = make_styles()
 
 if __name__ == "__main__":
     print(build_pdf())
-

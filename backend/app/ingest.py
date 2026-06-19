@@ -4,9 +4,11 @@ import argparse
 import hashlib
 import io
 import json
+import re
 from dataclasses import dataclass
 from typing import Any
 
+from .aws import boto3_client, boto3_session
 from .config import AppSettings
 from .retries import retry_transient
 from .secrets import SecretProvider
@@ -70,6 +72,54 @@ def infer_healthcare_metadata(key: str, checksum: str) -> dict[str, Any]:
     }
 
 
+def extract_document_facts(key: str, text: str) -> dict[str, str]:
+    normalized_key = key.lower()
+    normalized_text = re.sub(r"\s+", " ", text).strip()
+    if not normalized_text:
+        return {}
+
+    facts: dict[str, str] = {}
+    is_lease_like = any(
+        marker in normalized_key or marker in normalized_text.lower()
+        for marker in ["lease", "tenancy", "rent", "landlord", "tenant", "deposit"]
+    )
+    if not is_lease_like:
+        return facts
+
+    money = r"(?:£|GBP\s*)\s?\d[\d,]*(?:\.\d{2})?"
+    rent_patterns = [
+        rf"\brent(?:al)?(?:\s+amount|\s+payable|\s+is|\s*:)?\s*(?P<value>{money}(?:\s*(?:per|/)\s*(?:month|calendar month|pcm|week|annum|year))?)",
+        rf"\bmonthly\s+rent(?:\s+is|\s*:)?\s*(?P<value>{money}(?:\s*(?:per|/)\s*(?:month|calendar month|pcm))?)",
+        rf"(?P<value>{money}\s*(?:per|/)\s*(?:month|calendar month|pcm))",
+    ]
+    deposit_patterns = [
+        rf"\bdeposit(?:\s+amount|\s+is|\s*:)?\s*(?P<value>{money})",
+        rf"\bsecurity\s+deposit(?:\s+is|\s*:)?\s*(?P<value>{money})",
+    ]
+
+    for pattern in rent_patterns:
+        match = re.search(pattern, normalized_text, flags=re.IGNORECASE)
+        if match:
+            facts["rent_amount"] = match.group("value").strip()
+            break
+
+    for pattern in deposit_patterns:
+        match = re.search(pattern, normalized_text, flags=re.IGNORECASE)
+        if match:
+            facts["deposit_amount"] = match.group("value").strip()
+            break
+
+    address_match = re.search(
+        r"\b(?:property|premises|address)(?:\s+address|\s+is|\s*:)?\s*(?P<value>[^.;\n]{8,160})",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if address_match:
+        facts["property_address"] = re.sub(r"\s+", " ", address_match.group("value")).strip()
+
+    return facts
+
+
 def parse_document(key: str, data: bytes) -> ParsedDocument:
     lower = key.lower()
     title = key.rsplit("/", 1)[-1]
@@ -109,6 +159,10 @@ def parse_document(key: str, data: bytes) -> ParsedDocument:
         text = data.decode("utf-8", errors="replace")
         content_type = "text/plain"
 
+    facts = extract_document_facts(key, text)
+    if facts:
+        metadata["facts"] = facts
+
     return ParsedDocument(
         key=key,
         title=title,
@@ -119,16 +173,18 @@ def parse_document(key: str, data: bytes) -> ParsedDocument:
     )
 
 
-def chunk_text(text: str) -> list[str]:
+def chunk_text(text: str, chunk_size: int = 1500, chunk_overlap: int = 250) -> list[str]:
+    chunk_size = max(300, chunk_size)
+    chunk_overlap = max(0, min(chunk_overlap, chunk_size - 1))
     try:
         from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-        splitter = RecursiveCharacterTextSplitter(chunk_size=1200, chunk_overlap=180)
+        splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
         return splitter.split_text(text)
     except Exception:
         chunks: list[str] = []
-        step = 1000
-        overlap = 150
+        step = chunk_size
+        overlap = chunk_overlap
         index = 0
         while index < len(text):
             chunks.append(text[index : index + step])
@@ -140,22 +196,53 @@ class IngestionJob:
     def __init__(self, settings: AppSettings, secret_provider: SecretProvider):
         self.settings = settings
         self.secret_provider = secret_provider
-        import boto3
-
-        self.s3 = boto3.client("s3", region_name=settings.aws_region)
+        self.s3 = boto3_client(settings, "s3")
         self._embeddings: Any | None = None
         self._opensearch: Any | None = None
 
     @retry_transient
     def run(self) -> dict[str, Any]:
-        documents = self._load_documents()
+        existing_manifest = self._load_existing_manifest()
+        previous_index = existing_manifest.get("opensearch_index")
+        force_reindex = previous_index != self.settings.opensearch_index
+        existing_by_key = {
+            str(document.get("key", "")): document
+            for document in existing_manifest.get("documents", [])
+            if isinstance(document, dict) and document.get("key")
+        }
+        raw_documents = self._load_raw_documents()
+        seen_keys: set[str] = set()
         indexed_chunks = 0
+        indexed_documents = 0
+        skipped_documents = 0
+        deleted_documents = 0
+        deleted_chunks = 0
         manifest_documents = []
-        for document in documents:
-            chunks = chunk_text(document.text)
+        for raw_document in raw_documents:
+            key = raw_document["key"]
+            seen_keys.add(key)
+            checksum = checksum_bytes(raw_document["body"])
+            existing_document = existing_by_key.get(key)
+            if existing_document and existing_document.get("checksum") == checksum and not force_reindex:
+                skipped_documents += 1
+                unchanged_document = dict(existing_document)
+                unchanged_document["ingestion_status"] = "skipped_unchanged"
+                manifest_documents.append(unchanged_document)
+                continue
+
+            if existing_document and not force_reindex:
+                deleted_chunks += self._delete_document_chunks(key)
+
+            document = parse_document(key, raw_document["body"])
+            chunks = chunk_text(
+                document.text,
+                chunk_size=self.settings.ingestion_chunk_size,
+                chunk_overlap=self.settings.ingestion_chunk_overlap,
+            )
             for chunk_index, chunk in enumerate(chunks):
                 self._index_chunk(document, chunk, chunk_index)
                 indexed_chunks += 1
+            indexed_documents += 1
             manifest_documents.append(
                 {
                     "key": document.key,
@@ -164,10 +251,29 @@ class IngestionJob:
                     "checksum": document.checksum,
                     "metadata": document.metadata,
                     "chunk_count": len(chunks),
+                    "ingestion_status": "indexed",
                 }
             )
 
-        manifest = {"documents": manifest_documents, "indexed_chunks": indexed_chunks}
+        removed_keys = sorted(set(existing_by_key) - seen_keys)
+        if not force_reindex:
+            for key in removed_keys:
+                deleted_chunks += self._delete_document_chunks(key)
+                deleted_documents += 1
+
+        total_chunks = sum(int(document.get("chunk_count") or 0) for document in manifest_documents)
+        manifest = {
+            "opensearch_index": self.settings.opensearch_index,
+            "previous_opensearch_index": previous_index,
+            "force_reindex": force_reindex,
+            "documents": manifest_documents,
+            "indexed_chunks": indexed_chunks,
+            "total_chunks": total_chunks,
+            "indexed_documents": indexed_documents,
+            "skipped_documents": skipped_documents,
+            "deleted_documents": deleted_documents,
+            "deleted_chunks": deleted_chunks,
+        }
         self.s3.put_object(
             Bucket=self.settings.s3_bucket,
             Key=self.settings.s3_manifest_key,
@@ -176,9 +282,20 @@ class IngestionJob:
         )
         return manifest
 
-    def _load_documents(self) -> list[ParsedDocument]:
+    def _load_existing_manifest(self) -> dict[str, Any]:
+        try:
+            response = self.s3.get_object(
+                Bucket=self.settings.s3_bucket,
+                Key=self.settings.s3_manifest_key,
+            )
+            manifest = json.loads(response["Body"].read().decode("utf-8"))
+            return manifest if isinstance(manifest, dict) else {"documents": []}
+        except Exception:
+            return {"documents": []}
+
+    def _load_raw_documents(self) -> list[dict[str, Any]]:
         paginator = self.s3.get_paginator("list_objects_v2")
-        documents: list[ParsedDocument] = []
+        documents: list[dict[str, Any]] = []
         for page in paginator.paginate(Bucket=self.settings.s3_bucket, Prefix=self.settings.s3_raw_prefix):
             for item in page.get("Contents", []):
                 key = item["Key"]
@@ -187,8 +304,11 @@ class IngestionJob:
                 if not key.lower().endswith((".pdf", ".docx", ".txt", ".md", ".csv")):
                     continue
                 body = self.s3.get_object(Bucket=self.settings.s3_bucket, Key=key)["Body"].read()
-                documents.append(parse_document(key, body))
+                documents.append({"key": key, "body": body})
         return documents
+
+    def _load_documents(self) -> list[ParsedDocument]:
+        return [parse_document(document["key"], document["body"]) for document in self._load_raw_documents()]
 
     def _index_chunk(self, document: ParsedDocument, chunk: str, chunk_index: int) -> None:
         client = self._get_opensearch()
@@ -207,6 +327,19 @@ class IngestionJob:
         if embedding is not None:
             body["embedding"] = embedding
         client.index(index=self.settings.opensearch_index, id=doc_id, body=body, refresh=False)
+
+    def _delete_document_chunks(self, key: str) -> int:
+        client = self._get_opensearch()
+        try:
+            response = client.delete_by_query(
+                index=self.settings.opensearch_index,
+                body={"query": {"term": {"key": key}}},
+                refresh=True,
+                conflicts="proceed",
+            )
+            return int(response.get("deleted") or 0)
+        except Exception:
+            return 0
 
     def _embed(self, text: str) -> list[float] | None:
         try:
@@ -227,13 +360,12 @@ class IngestionJob:
     def _get_opensearch(self) -> Any:
         if self._opensearch is not None:
             return self._opensearch
-        import boto3
         from opensearchpy import OpenSearch, RequestsHttpConnection
         from opensearchpy import AWSV4SignerAuth
 
         if not self.settings.opensearch_endpoint:
             raise RuntimeError("OPENSEARCH_ENDPOINT is required for ingestion")
-        credentials = boto3.Session().get_credentials()
+        credentials = boto3_session(self.settings).get_credentials()
         auth = AWSV4SignerAuth(credentials, self.settings.aws_region, "aoss")
         host = self.settings.opensearch_endpoint.replace("https://", "").replace("http://", "")
         self._opensearch = OpenSearch(

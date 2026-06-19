@@ -1,4 +1,4 @@
-# AWS Deployment Notes
+# AWS Dev Deployment Notes
 
 Use the JSON templates in this folder as starting points for ECS Fargate task definitions and IAM policies.
 
@@ -13,9 +13,9 @@ Required AWS resources:
 - Application Load Balancer with routes for Streamlit and FastAPI
 - CloudWatch log groups
 - Secrets Manager secrets:
-  - `/company-assistant/prod/app`
-  - `/company-assistant/prod/azure-openai`
-  - `/company-assistant/prod/langfuse`
+- `/dstrmaysam-healthcare-knowledge-agent/dev/app`
+- `/dstrmaysam-healthcare-knowledge-agent/dev/azure-openai`
+- `/dstrmaysam-healthcare-knowledge-agent/dev/langfuse`
 
 The ECS task execution role pulls images and writes logs. The ECS task role reads only the required secret ARNs and application resources.
 

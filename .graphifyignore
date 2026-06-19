@@ -1,0 +1,14 @@
+*.pdf
+*.pptx
+*.ppt
+*.docx
+*.doc
+*.png
+*.jpg
+*.jpeg
+*.svg
+docs/
+documentation/
+papers/
+images/
+assets/

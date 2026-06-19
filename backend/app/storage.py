@@ -3,9 +3,11 @@ from __future__ import annotations
 import csv
 import io
 import json
+import time
 from dataclasses import dataclass
 from typing import Any
 
+from .aws import boto3_client
 from .config import AppSettings
 from .retries import retry_transient
 
@@ -23,13 +25,13 @@ class DocumentStore:
     def __init__(self, settings: AppSettings):
         self.settings = settings
         self._s3_client: Any | None = None
+        self._manifest_cache: dict[str, Any] | None = None
+        self._manifest_cache_expires_at = 0.0
 
     @property
     def s3_client(self) -> Any:
         if self._s3_client is None:
-            import boto3
-
-            self._s3_client = boto3.client("s3", region_name=self.settings.aws_region)
+            self._s3_client = boto3_client(self.settings, "s3")
         return self._s3_client
 
     def list_documents(self) -> list[DocumentRecord]:
@@ -79,13 +81,39 @@ class DocumentStore:
         return data.decode("utf-8", errors="replace")
 
     @retry_transient
+    def upload_document(self, key: str, data: bytes, content_type: str) -> None:
+        self.s3_client.put_object(
+            Bucket=self.settings.s3_bucket,
+            Key=key,
+            Body=data,
+            ContentType=content_type,
+        )
+        self.invalidate_manifest_cache()
+
+    def invalidate_manifest_cache(self) -> None:
+        self._manifest_cache = None
+        self._manifest_cache_expires_at = 0.0
+
+    @retry_transient
     def _load_manifest(self) -> dict[str, Any]:
         if not self.settings.s3_bucket:
             return {"documents": []}
+        ttl_seconds = max(0, self.settings.document_manifest_cache_ttl_seconds)
+        now = time.monotonic()
+        if (
+            ttl_seconds
+            and self._manifest_cache is not None
+            and now < self._manifest_cache_expires_at
+        ):
+            return self._manifest_cache
         try:
             response = self.s3_client.get_object(
                 Bucket=self.settings.s3_bucket, Key=self.settings.s3_manifest_key
             )
-            return json.loads(response["Body"].read().decode("utf-8"))
+            manifest = json.loads(response["Body"].read().decode("utf-8"))
         except Exception:
-            return {"documents": []}
+            manifest = {"documents": []}
+        if ttl_seconds:
+            self._manifest_cache = manifest
+            self._manifest_cache_expires_at = now + ttl_seconds
+        return manifest

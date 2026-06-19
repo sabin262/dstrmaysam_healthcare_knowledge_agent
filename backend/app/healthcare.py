@@ -19,6 +19,7 @@ class HealthcareUserContext:
     user_id: str
     roles: tuple[str, ...] = ("staff",)
     departments: tuple[str, ...] = ()
+    password_change_required: bool = False
 
     @classmethod
     def from_claims(cls, claims: dict[str, Any]) -> "HealthcareUserContext":
@@ -28,6 +29,7 @@ class HealthcareUserContext:
             user_id=str(claims["sub"]),
             roles=tuple(str(role).lower() for role in roles),
             departments=tuple(str(department).lower() for department in departments),
+            password_change_required=bool(claims.get("password_change_required", False)),
         )
 
     def has_role(self, role: str) -> bool:
@@ -248,4 +250,3 @@ class HealthcareAuditLogger:
         }
         LOGGER.info(json.dumps(event, sort_keys=True))
         return event
-

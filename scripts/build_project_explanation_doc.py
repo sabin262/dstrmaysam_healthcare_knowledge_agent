@@ -290,7 +290,7 @@ def setup_document() -> Document:
 
     header = section.header.paragraphs[0]
     header.text = ""
-    left = header.add_run("Internal Company Knowledge Assistant")
+    left = header.add_run("Dstrmaysam Healthcare Knowledge Agent")
     set_run_font(left, size=9, color=MUTED, bold=True)
     header.alignment = WD_ALIGN_PARAGRAPH.LEFT
 
@@ -308,7 +308,7 @@ def build() -> Path:
     title = doc.add_paragraph()
     title.paragraph_format.space_after = Pt(4)
     title.paragraph_format.keep_with_next = True
-    run = title.add_run("Internal Company Knowledge Assistant")
+    run = title.add_run("Dstrmaysam Healthcare Knowledge Agent")
     set_run_font(run, size=24, color=INK, bold=True)
     subtitle = add_para(
         doc,
@@ -379,7 +379,7 @@ def build() -> Path:
     add_heading(doc, "3. Backend Explanation", 1)
     add_para(
         doc,
-        "The backend is the system of record for security, orchestration, and traceable answer generation. It keeps credentials out of the browser and uses dependency-style service factories so the application can switch between memory-backed local development and AWS-backed production services.",
+        "The backend is the system of record for security, orchestration, and traceable answer generation. It keeps credentials out of the browser and uses dependency-style service factories so the application can switch between memory-backed local development and AWS-backed dev services.",
     )
     add_label_detail_table(
         doc,
@@ -450,7 +450,7 @@ def build() -> Path:
         doc,
         [
             ("Local mode", "Uses an in-memory repository for fast development and unit testing."),
-            ("Production mode", "Uses DynamoDB with user_id as the partition key and sort_key values for session summaries and messages."),
+            ("AWS dev mode", "Uses DynamoDB with user_id as the partition key and sort_key values for session summaries and messages."),
             ("Context control", "MAX_HISTORY_CHARS limits the amount of prior conversation injected into the prompt."),
             ("Long histories", "Older turns are omitted with a summary marker once the history window becomes too large."),
         ],
@@ -465,16 +465,16 @@ def build() -> Path:
         doc,
         ["Secret", "Contains", "Used by"],
         [
-            ["/company-assistant/{stage}/app", "session_secret and auth_users password-hash map.", "FastAPI authentication service."],
-            ["/company-assistant/{stage}/azure-openai", "endpoint, api_key, api_version, chat deployment, embedding deployment.", "LangChain chat model and embedding model."],
-            ["/company-assistant/{stage}/langfuse", "public key, secret key, base URL.", "Langfuse tracing and prompt management."],
+            ["/dstrmaysam-healthcare-knowledge-agent/{stage}/app", "session_secret and auth_users password-hash map.", "FastAPI authentication service."],
+            ["/dstrmaysam-healthcare-knowledge-agent/{stage}/azure-openai", "endpoint, api_key, api_version, chat deployment, embedding deployment.", "LangChain chat model and embedding model."],
+            ["/dstrmaysam-healthcare-knowledge-agent/{stage}/langfuse", "public key, secret key, base URL.", "Langfuse tracing and prompt management."],
         ],
         [2650, 4200, 2510],
     )
     add_callout(
         doc,
         "Security posture",
-        "The implemented login is intentionally simple for the MVP. For production hardening, the natural next step is Cognito, SSO/SAML, or an internal identity provider while keeping the same backend authorization pattern.",
+        "The implemented login is intentionally simple for the MVP. For future production hardening, the natural next step is Cognito, SSO/SAML, or an internal identity provider while keeping the same backend authorization pattern.",
     )
 
     add_heading(doc, "9. Observability, Prompt Versioning, And Evals", 1)
@@ -493,7 +493,7 @@ def build() -> Path:
         ],
     )
 
-    add_heading(doc, "10. AWS Deployment Explanation", 1)
+    add_heading(doc, "10. AWS Dev Deployment Explanation", 1)
     add_para(
         doc,
         "The deployment target is AWS ECS Fargate. Backend and frontend images are built separately, pushed to ECR, and deployed as services. An Application Load Balancer exposes the user-facing Streamlit service and can route API traffic internally or through a protected backend listener.",
@@ -591,7 +591,7 @@ def build() -> Path:
     add_heading(doc, "16. Final Summary", 1)
     add_para(
         doc,
-        "This project is a strong five-day MVP because it demonstrates the full production shape of an internal knowledge assistant: containerized services, AWS hosting path, secure secret management, agentic tool use, RAG, persistent context, observability, prompt versioning, evaluation, and stress testing. The scaffold is intentionally extensible: it can run locally with development settings, then move toward production by configuring AWS resources and live Azure OpenAI/Langfuse secrets.",
+        "This project is a strong five-day MVP because it demonstrates the full AWS dev deployment shape of an internal knowledge assistant: containerized services, AWS hosting path, secure secret management, agentic tool use, RAG, persistent context, observability, prompt versioning, evaluation, and stress testing. The scaffold is intentionally extensible: it can run locally with development settings, then run against AWS dev by configuring AWS resources and live Azure OpenAI/Langfuse secrets, with future production hardening as a later step.",
     )
 
     doc.save(DOCX_PATH)
@@ -601,4 +601,3 @@ def build() -> Path:
 if __name__ == "__main__":
     path = build()
     print(path)
-

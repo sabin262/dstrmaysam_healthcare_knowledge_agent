@@ -1,4 +1,4 @@
-# Internal Company Knowledge Assistant
+# Dstrmaysam Healthcare Knowledge Agent
 
 This repository implements a containerized internal knowledge assistant MVP with:
 
@@ -6,11 +6,11 @@ This repository implements a containerized internal knowledge assistant MVP with
 - Streamlit chat frontend
 - Simple login
 - Persistent chat history
-- LangChain agent with three tools
+- LangGraph agent orchestration with LangChain Azure OpenAI integrations
 - RAG over S3 documents and OpenSearch Serverless
 - Azure OpenAI through `langchain-openai`
 - Langfuse tracing and prompt management
-- RAGAS golden-data evaluation
+- RAGAS golden-data evaluation with optional Langfuse score publishing
 - 100-query stress testing
 - AWS Secrets Manager for all secrets
 - ECR/ECS Fargate deployment templates
@@ -21,7 +21,7 @@ All secret values must be stored in AWS Secrets Manager. Do not put API keys, pa
 
 Expected secret JSON documents:
 
-`/company-assistant/dev/app`
+`/dstrmaysam-healthcare-knowledge-agent/dev/app`
 
 ```json
 {
@@ -38,7 +38,7 @@ Expected secret JSON documents:
 }
 ```
 
-`/company-assistant/dev/azure-openai`
+`/dstrmaysam-healthcare-knowledge-agent/dev/azure-openai`
 
 ```json
 {
@@ -50,7 +50,7 @@ Expected secret JSON documents:
 }
 ```
 
-`/company-assistant/dev/langfuse`
+`/dstrmaysam-healthcare-knowledge-agent/dev/langfuse`
 
 ```json
 {
@@ -111,6 +111,17 @@ For the healthcare Phase One scaffold, use:
 ```bash
 python evals/run_ragas_eval.py --dataset evals/healthcare_golden_dataset.csv --api-url http://localhost:8000 --token YOUR_TOKEN
 ```
+
+Publish per-question and summary RAGAS scores to Langfuse:
+
+```bash
+python evals/run_ragas_eval.py --api-url http://localhost:8000 --token YOUR_TOKEN --publish-langfuse --secrets-stage dev
+```
+
+The eval runner loads Langfuse credentials from AWS Secrets Manager using
+`/dstrmaysam-healthcare-knowledge-agent/<stage>/langfuse` unless `--langfuse-secret-name` is provided.
+RAGAS contexts use `/chat` source snippets when available and fall back to source
+URIs.
 
 Run the 100-query stress test:
 

@@ -1,5 +1,5 @@
 {
-  "TableName": "company_assistant_chat_history",
+  "TableName": "dstrmaysam-healthcare-knowledge-agent-dev",
   "BillingMode": "PAY_PER_REQUEST",
   "AttributeDefinitions": [
     {
@@ -22,4 +22,3 @@
     }
   ]
 }
-

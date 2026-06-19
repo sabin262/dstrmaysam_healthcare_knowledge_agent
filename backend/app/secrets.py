@@ -4,6 +4,7 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
+from .aws import boto3_client
 from .config import AppSettings
 from .retries import retry_transient
 
@@ -59,7 +60,7 @@ class SecretProvider:
                 "boto3 is required to load secrets from AWS Secrets Manager"
             ) from exc
 
-        client = boto3.client("secretsmanager", region_name=self.settings.aws_region)
+        client = boto3_client(self.settings, "secretsmanager")
         try:
             response = client.get_secret_value(SecretId=secret_name)
         except Exception as exc:  # boto3 raises service-specific exceptions.
@@ -79,6 +80,22 @@ class SecretProvider:
 
         self._cache[secret_name] = value
         return value
+
+    @retry_transient
+    def put_json(self, secret_name: str, value: dict[str, Any]) -> None:
+        try:
+            import boto3
+        except ImportError as exc:
+            raise SecretProviderError(
+                "boto3 is required to write secrets to AWS Secrets Manager"
+            ) from exc
+
+        client = boto3_client(self.settings, "secretsmanager")
+        try:
+            client.put_secret_value(SecretId=secret_name, SecretString=json.dumps(value))
+        except Exception as exc:  # boto3 raises service-specific exceptions.
+            raise SecretProviderError(f"Unable to update secret {secret_name!r}") from exc
+        self._cache[secret_name] = dict(value)
 
     def load_app(self) -> AppSecrets:
         data = self.get_json(self.settings.app_secret_name)
@@ -101,8 +118,11 @@ class SecretProvider:
 
     def load_azure_openai(self) -> AzureOpenAISecrets:
         data = self.get_json(self.settings.azure_openai_secret_name)
-        required = ["endpoint", "api_key", "chat_deployment", "embedding_deployment"]
+        chat_deployment = self.settings.azure_openai_deployment or str(data.get("chat_deployment", ""))
+        required = ["endpoint", "api_key", "embedding_deployment"]
         missing = [key for key in required if not data.get(key)]
+        if not chat_deployment:
+            missing.append("chat_deployment or AZURE_OPENAI_DEPLOYMENT")
         if missing:
             raise SecretProviderError(
                 f"Azure OpenAI secret is missing required keys: {', '.join(missing)}"
@@ -111,7 +131,7 @@ class SecretProvider:
             endpoint=str(data["endpoint"]),
             api_key=str(data["api_key"]),
             api_version=str(data.get("api_version", "2025-04-01-preview")),
-            chat_deployment=str(data["chat_deployment"]),
+            chat_deployment=chat_deployment,
             embedding_deployment=str(data["embedding_deployment"]),
         )
 
@@ -129,7 +149,7 @@ class SecretProvider:
 
 
 class StaticSecretProvider(SecretProvider):
-    """Test-only provider that keeps the production app contract intact."""
+    """Test-only provider that keeps the deployed app contract intact."""
 
     def __init__(self, settings: AppSettings, secrets: dict[str, dict[str, Any]]):
         super().__init__(settings)
@@ -139,3 +159,7 @@ class StaticSecretProvider(SecretProvider):
         if secret_name not in self._static_secrets:
             raise SecretProviderError(f"Static secret {secret_name!r} not configured")
         return self._static_secrets[secret_name]
+
+    def put_json(self, secret_name: str, value: dict[str, Any]) -> None:
+        self._static_secrets[secret_name] = dict(value)
+        self._cache[secret_name] = dict(value)
