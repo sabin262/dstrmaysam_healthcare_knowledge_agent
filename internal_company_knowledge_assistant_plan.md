@@ -1,7 +1,7 @@
-# Internal Company Knowledge Assistant Plan
+# Dstrmaysam Healthcare Knowledge Agent Plan
 
 ## Summary
-Build a five-day MVP for an internal company knowledge assistant with FastAPI, Streamlit, LangChain, Azure OpenAI, S3, OpenSearch Serverless, Langfuse, RAGAS, AWS Secrets Manager, simple login, persistent chat history, and ECS Fargate deployment.
+Build a five-day MVP for the Dstrmaysam Healthcare Knowledge Agent with FastAPI, Streamlit, LangGraph, LangChain integrations, Azure OpenAI, S3, OpenSearch Serverless, Langfuse, RAGAS, AWS Secrets Manager, simple login, persistent chat history, and ECS Fargate deployment.
 
 ## Architecture
 ```mermaid
@@ -12,7 +12,7 @@ flowchart LR
   API --> Auth[Simple Login]
   Auth --> Secrets[AWS Secrets Manager]
   API --> History[DynamoDB Chat History]
-  API --> Agent[LangChain Agent]
+  API --> Agent[LangGraph KnowledgeAgent]
   Agent --> RAG[RAG Search Tool]
   Agent --> Catalog[Document Catalog Tool]
   Agent --> Table[CSV/Table Lookup Tool]
@@ -27,7 +27,7 @@ flowchart LR
 ## Core Tech Stack
 - Backend: FastAPI, Uvicorn, Pydantic
 - Frontend: Streamlit
-- Agent framework: LangChain
+- Agent framework: LangGraph orchestration with LangChain integrations
 - LLM: Azure OpenAI through `langchain-openai`
 - RAG storage: Amazon S3 + OpenSearch Serverless
 - Chat history: DynamoDB
@@ -53,4 +53,3 @@ flowchart LR
 - RAGAS golden-data report is generated.
 - 100-query stress-test report is generated.
 - App runs locally with Docker and deploys to ECS Fargate.
-

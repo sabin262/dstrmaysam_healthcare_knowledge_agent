@@ -7,6 +7,7 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
+from .aws import boto3_client, boto3_session
 from .config import AppSettings
 from .retries import retry_transient
 from .secrets import SecretProvider
@@ -140,9 +141,7 @@ class IngestionJob:
     def __init__(self, settings: AppSettings, secret_provider: SecretProvider):
         self.settings = settings
         self.secret_provider = secret_provider
-        import boto3
-
-        self.s3 = boto3.client("s3", region_name=settings.aws_region)
+        self.s3 = boto3_client(settings, "s3")
         self._embeddings: Any | None = None
         self._opensearch: Any | None = None
 
@@ -227,13 +226,12 @@ class IngestionJob:
     def _get_opensearch(self) -> Any:
         if self._opensearch is not None:
             return self._opensearch
-        import boto3
         from opensearchpy import OpenSearch, RequestsHttpConnection
         from opensearchpy import AWSV4SignerAuth
 
         if not self.settings.opensearch_endpoint:
             raise RuntimeError("OPENSEARCH_ENDPOINT is required for ingestion")
-        credentials = boto3.Session().get_credentials()
+        credentials = boto3_session(self.settings).get_credentials()
         auth = AWSV4SignerAuth(credentials, self.settings.aws_region, "aoss")
         host = self.settings.opensearch_endpoint.replace("https://", "").replace("http://", "")
         self._opensearch = OpenSearch(

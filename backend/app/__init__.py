@@ -1,2 +1,1 @@
-"""Internal company knowledge assistant backend."""
-
+"""Dstrmaysam Healthcare Knowledge Agent backend."""

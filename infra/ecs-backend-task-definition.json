@@ -1,15 +1,15 @@
 {
-  "family": "company-assistant-backend",
+  "family": "dstrmaysam-healthcare-knowledge-agent-backend",
   "networkMode": "awsvpc",
   "requiresCompatibilities": ["FARGATE"],
   "cpu": "1024",
   "memory": "2048",
-  "executionRoleArn": "arn:aws:iam::<account-id>:role/company-assistant-ecs-execution-role",
-  "taskRoleArn": "arn:aws:iam::<account-id>:role/company-assistant-backend-task-role",
+  "executionRoleArn": "arn:aws:iam::<account-id>:role/dstrmaysam-healthcare-knowledge-agent-ecs-execution-role",
+  "taskRoleArn": "arn:aws:iam::<account-id>:role/dstrmaysam-healthcare-knowledge-agent-backend-task-role",
   "containerDefinitions": [
     {
       "name": "backend",
-      "image": "<account-id>.dkr.ecr.<region>.amazonaws.com/company-assistant-backend:latest",
+      "image": "<account-id>.dkr.ecr.<region>.amazonaws.com/dstrmaysam-healthcare-knowledge-agent-backend:latest",
       "essential": true,
       "portMappings": [
         {
@@ -18,24 +18,25 @@
         }
       ],
       "environment": [
-        {"name": "APP_ENV", "value": "prod"},
+        {"name": "APP_ENV", "value": "dev"},
         {"name": "AWS_REGION", "value": "<region>"},
-        {"name": "SECRETS_STAGE", "value": "prod"},
-        {"name": "APP_SECRET_NAME", "value": "/company-assistant/prod/app"},
-        {"name": "AZURE_OPENAI_SECRET_NAME", "value": "/company-assistant/prod/azure-openai"},
-        {"name": "LANGFUSE_SECRET_NAME", "value": "/company-assistant/prod/langfuse"},
-        {"name": "S3_BUCKET", "value": "<documents-bucket>"},
+        {"name": "SECRETS_STAGE", "value": "dev"},
+        {"name": "APP_SECRET_NAME", "value": "/dstrmaysam-healthcare-knowledge-agent/dev/app"},
+        {"name": "AZURE_OPENAI_SECRET_NAME", "value": "/dstrmaysam-healthcare-knowledge-agent/dev/azure-openai"},
+        {"name": "LANGFUSE_SECRET_NAME", "value": "/dstrmaysam-healthcare-knowledge-agent/dev/langfuse"},
+        {"name": "S3_BUCKET", "value": "dstrmaysam-healthcare-knowledge-agent-dev"},
         {"name": "S3_RAW_PREFIX", "value": "raw/"},
         {"name": "S3_MANIFEST_KEY", "value": "manifests/documents.json"},
         {"name": "OPENSEARCH_ENDPOINT", "value": "https://<collection-id>.<region>.aoss.amazonaws.com"},
-        {"name": "OPENSEARCH_INDEX", "value": "company-knowledge"},
-        {"name": "DYNAMODB_CHAT_TABLE", "value": "company_assistant_chat_history"},
-        {"name": "CHAT_HISTORY_BACKEND", "value": "dynamodb"}
+        {"name": "OPENSEARCH_INDEX", "value": "dstrmaysam-healthcare-knowledge-agent"},
+        {"name": "DYNAMODB_CHAT_TABLE", "value": "dstrmaysam-healthcare-knowledge-agent-dev"},
+        {"name": "CHAT_HISTORY_BACKEND", "value": "dynamodb"},
+        {"name": "LOCAL_TEST_ADMIN_ENABLED", "value": "false"}
       ],
       "logConfiguration": {
         "logDriver": "awslogs",
         "options": {
-          "awslogs-group": "/ecs/company-assistant/backend",
+          "awslogs-group": "/ecs/dstrmaysam-healthcare-knowledge-agent/backend",
           "awslogs-region": "<region>",
           "awslogs-stream-prefix": "ecs"
         }
@@ -43,4 +44,3 @@
     }
   ]
 }
-

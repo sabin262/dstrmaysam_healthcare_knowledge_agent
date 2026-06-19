@@ -39,7 +39,7 @@ class AppSettings:
     @classmethod
     def from_env(cls) -> "AppSettings":
         stage = _env("SECRETS_STAGE", "dev")
-        default_prefix = f"/company-assistant/{stage}"
+        default_prefix = f"/dstrmaysam-healthcare-knowledge-agent/{stage}"
         origins = tuple(
             origin.strip()
             for origin in _env("CORS_ORIGINS", "http://localhost:8501").split(",")
@@ -58,11 +58,14 @@ class AppSettings:
             s3_raw_prefix=_env("S3_RAW_PREFIX", "raw/"),
             s3_manifest_key=_env("S3_MANIFEST_KEY", "manifests/documents.json"),
             opensearch_endpoint=_env("OPENSEARCH_ENDPOINT"),
-            opensearch_index=_env("OPENSEARCH_INDEX", "company-knowledge"),
-            dynamodb_chat_table=_env("DYNAMODB_CHAT_TABLE", "company_assistant_chat_history"),
+            opensearch_index=_env("OPENSEARCH_INDEX", "dstrmaysam-healthcare-knowledge-agent"),
+            dynamodb_chat_table=_env(
+                "DYNAMODB_CHAT_TABLE",
+                "dstrmaysam-healthcare-knowledge-agent-dev",
+            ),
             chat_history_backend=_env("CHAT_HISTORY_BACKEND", "memory"),
             cors_origins=origins,
-            prompt_label=_env("PROMPT_LABEL", "production"),
+            prompt_label=_env("PROMPT_LABEL", "dev"),
             max_history_chars=int(_env("MAX_HISTORY_CHARS", "8000")),
             local_test_admin_enabled=_env_bool("LOCAL_TEST_ADMIN_ENABLED", False),
             local_test_admin_username=_env("LOCAL_TEST_ADMIN_USERNAME", "admin"),

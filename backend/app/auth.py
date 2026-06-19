@@ -5,6 +5,7 @@ import getpass
 import hashlib
 import hmac
 import json
+import re
 import secrets
 import sys
 import time
@@ -23,6 +24,32 @@ class AuthenticationError(RuntimeError):
 
 
 LOCAL_TEST_ADMIN_ENVS = {"local", "test"}
+KNOWN_USER_ROLES = (
+    "admin",
+    "staff",
+    "doctor",
+    "nurse",
+    "pharmacy",
+    "clinical_governance",
+    "manager",
+)
+USERNAME_PATTERN = re.compile(r"^[A-Za-z0-9_.@-]{3,64}$")
+
+
+class AuthorizationError(RuntimeError):
+    """Raised when the authenticated user lacks a required permission."""
+
+
+class PasswordChangeRequiredError(AuthorizationError):
+    """Raised when a user must change their password before continuing."""
+
+
+class UserManagementError(RuntimeError):
+    """Raised when an admin user-management operation is invalid."""
+
+    def __init__(self, message: str, status_code: int = 400):
+        super().__init__(message)
+        self.status_code = status_code
 
 
 def _b64url_encode(data: bytes) -> str:
@@ -91,6 +118,24 @@ def decode_access_token(token: str, session_secret: str) -> dict[str, Any]:
         raise AuthenticationError("Invalid access token") from exc
 
 
+@dataclass(frozen=True)
+class LoginResult:
+    access_token: str
+    expires_in: int
+    username: str
+    roles: list[str]
+    departments: list[str]
+    password_change_required: bool
+
+
+@dataclass(frozen=True)
+class ManagedUser:
+    username: str
+    roles: list[str]
+    departments: list[str]
+    password_change_required: bool
+
+
 @dataclass
 class AuthService:
     secret_provider: SecretProvider
@@ -105,7 +150,7 @@ class AuthService:
                 if not self._local_test_admin_allowed():
                     raise
                 app_secrets = AppSecrets(
-                    session_secret="local-test-session-secret-not-for-production",
+                    session_secret="local-test-session-secret-local-only",
                     auth_users={},
                     user_profiles={},
                 )
@@ -150,24 +195,267 @@ class AuthService:
             user_profiles=user_profiles,
         )
 
-    def login(self, username: str, password: str) -> str:
+    def _app_secret_payload(self) -> dict[str, Any]:
+        return dict(self.secret_provider.get_json(self.secret_provider.settings.app_secret_name))
+
+    def _write_app_secret_payload(self, payload: dict[str, Any]) -> None:
+        self.secret_provider.put_json(self.secret_provider.settings.app_secret_name, payload)
+        self._app_secrets = None
+
+    def _profile_for(self, username: str, app_secrets: AppSecrets | None = None) -> dict[str, Any]:
+        secrets_value = app_secrets or self._secrets()
+        return dict(secrets_value.user_profiles.get(username, {}))
+
+    def _roles_from_profile(self, profile: dict[str, Any]) -> list[str]:
+        roles = profile.get("roles", ["staff"])
+        if isinstance(roles, str):
+            roles = [roles]
+        result = []
+        for role in roles or ["staff"]:
+            value = str(role).strip().lower()
+            if value and value not in result:
+                result.append(value)
+        return result or ["staff"]
+
+    def _departments_from_profile(self, profile: dict[str, Any]) -> list[str]:
+        departments = profile.get("departments", [])
+        if isinstance(departments, str):
+            departments = [departments]
+        result = []
+        for department in departments or []:
+            value = str(department).strip().lower()
+            if value and value not in result:
+                result.append(value)
+        return result
+
+    def _password_change_required_from_profile(self, profile: dict[str, Any]) -> bool:
+        return bool(profile.get("password_change_required", False))
+
+    def _claims_for_username(self, username: str) -> dict[str, Any]:
+        app_secrets = self._secrets()
+        if username not in app_secrets.auth_users:
+            raise AuthenticationError("User no longer exists")
+        profile = self._profile_for(username, app_secrets)
+        return {
+            "sub": username,
+            "roles": self._roles_from_profile(profile),
+            "departments": self._departments_from_profile(profile),
+            "password_change_required": self._password_change_required_from_profile(profile),
+        }
+
+    def _login_result_for(self, username: str) -> LoginResult:
+        claims = self._claims_for_username(username)
+        token_claims = {
+            "roles": claims["roles"],
+            "departments": claims["departments"],
+            "password_change_required": claims["password_change_required"],
+        }
+        token = create_access_token(
+            username,
+            self._secrets().session_secret,
+            self.token_ttl_seconds,
+            token_claims,
+        )
+        return LoginResult(
+            access_token=token,
+            expires_in=self.token_ttl_seconds,
+            username=username,
+            roles=list(claims["roles"]),
+            departments=list(claims["departments"]),
+            password_change_required=bool(claims["password_change_required"]),
+        )
+
+    def login(self, username: str, password: str) -> LoginResult:
+        username = username.strip()
         app_secrets = self._secrets()
         stored_hash = app_secrets.auth_users.get(username)
         if not stored_hash or not verify_password(password, stored_hash):
             raise AuthenticationError("Invalid username or password")
-        profile = app_secrets.user_profiles.get(username, {})
-        claims = {
-            "roles": profile.get("roles", ["staff"]),
-            "departments": profile.get("departments", []),
-        }
-        return create_access_token(username, app_secrets.session_secret, self.token_ttl_seconds, claims)
+        return self._login_result_for(username)
 
     def verify_token(self, token: str) -> str:
-        payload = decode_access_token(token, self._secrets().session_secret)
-        return str(payload["sub"])
+        return str(self.verify_token_claims(token)["sub"])
 
     def verify_token_claims(self, token: str) -> dict[str, Any]:
-        return decode_access_token(token, self._secrets().session_secret)
+        payload = decode_access_token(token, self._secrets().session_secret)
+        return self._claims_for_username(str(payload["sub"]))
+
+    def ensure_password_change_not_required(self, claims: dict[str, Any]) -> None:
+        if claims.get("password_change_required"):
+            raise PasswordChangeRequiredError("Password change required")
+
+    def ensure_admin(self, claims: dict[str, Any]) -> None:
+        self.ensure_password_change_not_required(claims)
+        roles = {str(role).lower() for role in claims.get("roles", [])}
+        if "admin" not in roles:
+            raise AuthorizationError("Admin role required")
+
+    def change_password(self, username: str, current_password: str, new_password: str) -> LoginResult:
+        username = username.strip()
+        self._validate_password(new_password)
+        payload = self._app_secret_payload()
+        auth_users = self._auth_users_payload(payload)
+        user_profiles = self._user_profiles_payload(payload)
+        stored_hash = auth_users.get(username)
+        if not stored_hash or not verify_password(current_password, str(stored_hash)):
+            raise AuthenticationError("Invalid username or password")
+        auth_users[username] = hash_password(new_password)
+        profile = dict(user_profiles.get(username, {}))
+        profile["password_change_required"] = False
+        user_profiles[username] = profile
+        payload["auth_users"] = auth_users
+        payload["user_profiles"] = user_profiles
+        self._write_app_secret_payload(payload)
+        return self._login_result_for(username)
+
+    def list_users(self) -> list[ManagedUser]:
+        app_secrets = self._secrets()
+        users = []
+        for username in sorted(app_secrets.auth_users):
+            profile = self._profile_for(username, app_secrets)
+            users.append(
+                ManagedUser(
+                    username=username,
+                    roles=self._roles_from_profile(profile),
+                    departments=self._departments_from_profile(profile),
+                    password_change_required=self._password_change_required_from_profile(profile),
+                )
+            )
+        return users
+
+    def create_user(
+        self,
+        username: str,
+        temporary_password: str,
+        roles: list[str],
+        departments: list[str],
+    ) -> ManagedUser:
+        username = self._validate_username(username)
+        self._validate_password(temporary_password)
+        normalized_roles = self._validate_roles(roles)
+        normalized_departments = self._normalize_departments(departments)
+        payload = self._app_secret_payload()
+        auth_users = self._auth_users_payload(payload)
+        user_profiles = self._user_profiles_payload(payload)
+        if username in auth_users:
+            raise UserManagementError("User already exists", status_code=409)
+        auth_users[username] = hash_password(temporary_password)
+        user_profiles[username] = {
+            "roles": normalized_roles,
+            "departments": normalized_departments,
+            "password_change_required": True,
+        }
+        payload["auth_users"] = auth_users
+        payload["user_profiles"] = user_profiles
+        self._write_app_secret_payload(payload)
+        return ManagedUser(username, normalized_roles, normalized_departments, True)
+
+    def update_user(
+        self,
+        username: str,
+        roles: list[str] | None = None,
+        departments: list[str] | None = None,
+    ) -> ManagedUser:
+        username = username.strip()
+        payload = self._app_secret_payload()
+        auth_users = self._auth_users_payload(payload)
+        user_profiles = self._user_profiles_payload(payload)
+        if username not in auth_users:
+            raise UserManagementError("User not found", status_code=404)
+        profile = dict(user_profiles.get(username, {}))
+        if roles is not None:
+            profile["roles"] = self._validate_roles(roles)
+        if departments is not None:
+            profile["departments"] = self._normalize_departments(departments)
+        user_profiles[username] = profile
+        self._ensure_admin_remains(auth_users, user_profiles)
+        payload["auth_users"] = auth_users
+        payload["user_profiles"] = user_profiles
+        self._write_app_secret_payload(payload)
+        return ManagedUser(
+            username=username,
+            roles=self._roles_from_profile(profile),
+            departments=self._departments_from_profile(profile),
+            password_change_required=self._password_change_required_from_profile(profile),
+        )
+
+    def reset_password(self, username: str, temporary_password: str) -> ManagedUser:
+        username = username.strip()
+        self._validate_password(temporary_password)
+        payload = self._app_secret_payload()
+        auth_users = self._auth_users_payload(payload)
+        user_profiles = self._user_profiles_payload(payload)
+        if username not in auth_users:
+            raise UserManagementError("User not found", status_code=404)
+        auth_users[username] = hash_password(temporary_password)
+        profile = dict(user_profiles.get(username, {}))
+        profile["password_change_required"] = True
+        user_profiles[username] = profile
+        payload["auth_users"] = auth_users
+        payload["user_profiles"] = user_profiles
+        self._write_app_secret_payload(payload)
+        return ManagedUser(
+            username=username,
+            roles=self._roles_from_profile(profile),
+            departments=self._departments_from_profile(profile),
+            password_change_required=True,
+        )
+
+    def _auth_users_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        auth_users = payload.get("auth_users", {})
+        if not isinstance(auth_users, dict):
+            raise UserManagementError("App secret auth_users must be a JSON object")
+        return dict(auth_users)
+
+    def _user_profiles_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        profiles = payload.get("user_profiles", {})
+        if not isinstance(profiles, dict):
+            raise UserManagementError("App secret user_profiles must be a JSON object")
+        return {str(username): dict(profile) for username, profile in profiles.items() if isinstance(profile, dict)}
+
+    def _validate_username(self, username: str) -> str:
+        normalized = username.strip()
+        if not USERNAME_PATTERN.fullmatch(normalized):
+            raise UserManagementError(
+                "Username must be 3-64 characters using letters, numbers, _, ., @, or -"
+            )
+        return normalized
+
+    def _validate_password(self, password: str) -> None:
+        if len(password) < 8:
+            raise UserManagementError("Password must be at least 8 characters")
+
+    def _validate_roles(self, roles: list[str]) -> list[str]:
+        normalized = []
+        for role in roles:
+            value = str(role).strip().lower()
+            if value and value not in normalized:
+                normalized.append(value)
+        if not normalized:
+            raise UserManagementError("At least one role is required")
+        invalid = [role for role in normalized if role not in KNOWN_USER_ROLES]
+        if invalid:
+            raise UserManagementError(f"Unknown role: {', '.join(invalid)}")
+        return normalized
+
+    def _normalize_departments(self, departments: list[str]) -> list[str]:
+        normalized = []
+        for department in departments:
+            value = str(department).strip().lower()
+            if value and value not in normalized:
+                normalized.append(value)
+        return normalized
+
+    def _ensure_admin_remains(
+        self,
+        auth_users: dict[str, Any],
+        user_profiles: dict[str, dict[str, Any]],
+    ) -> None:
+        for username in auth_users:
+            profile = dict(user_profiles.get(username, {}))
+            if "admin" in self._roles_from_profile(profile):
+                return
+        raise UserManagementError("At least one admin user is required")
 
 
 def _hash_password_cli() -> int:

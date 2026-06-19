@@ -13,6 +13,15 @@ class LoginRequest(BaseModel):
 class LoginResponse(BaseModel):
     access_token: str
     expires_in: int
+    username: str | None = None
+    roles: list[str] = Field(default_factory=list)
+    departments: list[str] = Field(default_factory=list)
+    password_change_required: bool = False
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str = Field(min_length=1)
+    new_password: str = Field(min_length=8)
 
 
 class ChatRequest(BaseModel):
@@ -25,6 +34,7 @@ class Source(BaseModel):
     uri: str
     score: float | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+    snippet: str | None = None
 
 
 class ChatResponse(BaseModel):
@@ -49,3 +59,26 @@ class ChatSessionSummary(BaseModel):
 class ChatSessionDetail(BaseModel):
     session_id: str
     messages: list[dict[str, Any]]
+
+
+class AdminUserSummary(BaseModel):
+    username: str
+    roles: list[str]
+    departments: list[str]
+    password_change_required: bool = False
+
+
+class AdminUserCreateRequest(BaseModel):
+    username: str = Field(min_length=1)
+    temporary_password: str = Field(min_length=8)
+    roles: list[str]
+    departments: list[str] = Field(default_factory=list)
+
+
+class AdminUserUpdateRequest(BaseModel):
+    roles: list[str] | None = None
+    departments: list[str] | None = None
+
+
+class AdminPasswordResetRequest(BaseModel):
+    temporary_password: str = Field(min_length=8)

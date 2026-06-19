@@ -6,6 +6,7 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
+from .aws import boto3_client
 from .config import AppSettings
 from .retries import retry_transient
 
@@ -27,9 +28,7 @@ class DocumentStore:
     @property
     def s3_client(self) -> Any:
         if self._s3_client is None:
-            import boto3
-
-            self._s3_client = boto3.client("s3", region_name=self.settings.aws_region)
+            self._s3_client = boto3_client(self.settings, "s3")
         return self._s3_client
 
     def list_documents(self) -> list[DocumentRecord]:

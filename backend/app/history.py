@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Protocol
 
+from .aws import boto3_resource
 from .config import AppSettings
 
 
@@ -81,14 +82,11 @@ class DynamoDBChatHistoryRepository:
         if not settings.dynamodb_chat_table:
             raise ValueError("DYNAMODB_CHAT_TABLE must be configured")
         try:
-            import boto3
             from boto3.dynamodb.conditions import Key
         except ImportError as exc:
             raise RuntimeError("boto3 is required for DynamoDB chat history") from exc
         self._key = Key
-        self._table = boto3.resource("dynamodb", region_name=settings.aws_region).Table(
-            settings.dynamodb_chat_table
-        )
+        self._table = boto3_resource(settings, "dynamodb").Table(settings.dynamodb_chat_table)
 
     def save_message(self, user_id: str, session_id: str, message: ChatMessage) -> None:
         timestamp_ms = int(time.time() * 1000)
@@ -182,4 +180,3 @@ def build_history_context(messages: list[ChatMessage], max_chars: int) -> str:
     if omitted > 0:
         return f"Earlier conversation summarized: {omitted} older messages omitted.\n" + "\n".join(retained)
     return "\n".join(retained)
-

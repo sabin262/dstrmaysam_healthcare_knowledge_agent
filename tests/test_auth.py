@@ -60,15 +60,16 @@ class AuthTests(unittest.TestCase):
     def test_local_test_admin_can_login_without_secret_manager(self):
         service = AuthService(FailingSecretProvider(auth_test_settings()))
 
-        token = service.login("admin", "admin123")
-        claims = service.verify_token_claims(token)
+        result = service.login("admin", "admin123")
+        claims = service.verify_token_claims(result.access_token)
 
         self.assertEqual(claims["sub"], "admin")
         self.assertIn("admin", claims["roles"])
         self.assertIn("clinical_governance", claims["departments"])
+        self.assertFalse(claims["password_change_required"])
 
-    def test_local_test_admin_is_not_allowed_in_production(self):
-        service = AuthService(FailingSecretProvider(auth_test_settings(app_env="production")))
+    def test_local_test_admin_is_not_allowed_in_dev(self):
+        service = AuthService(FailingSecretProvider(auth_test_settings(app_env="dev")))
 
         with self.assertRaises(SecretProviderError):
             service.login("admin", "admin123")

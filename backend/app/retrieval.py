@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Sequence
 
+from .aws import boto3_session
 from .config import AppSettings
 from .retries import retry_transient
 from .secrets import SecretProvider
@@ -25,33 +26,49 @@ class RetrievalService:
         self._embedding_model: Any | None = None
 
     @retry_transient
-    def search(self, query: str, top_k: int = 5) -> list[RetrievalHit]:
+    def search(
+        self,
+        query: str,
+        top_k: int = 5,
+        document_keys: Sequence[str] | None = None,
+    ) -> list[RetrievalHit]:
         if not self.settings.opensearch_endpoint:
             return []
         client = self._get_opensearch_client()
         vector = self._embed_query(query)
+        filtered_keys = list(dict.fromkeys(key for key in (document_keys or []) if key))
+        key_filter = {"terms": {"key": filtered_keys}} if filtered_keys else None
         body: dict[str, Any]
         if vector:
+            knn_field: dict[str, Any] = {
+                "vector": vector,
+                "k": top_k,
+            }
+            if key_filter:
+                knn_field["filter"] = key_filter
             body = {
                 "size": top_k,
                 "query": {
                     "knn": {
-                        "embedding": {
-                            "vector": vector,
-                            "k": top_k,
-                        }
+                        "embedding": knn_field
                     }
                 },
             }
         else:
+            keyword_query = {
+                "multi_match": {
+                    "query": query,
+                    "fields": ["text^2", "title", "metadata.*"],
+                }
+            }
+            query_body = (
+                {"bool": {"must": [keyword_query], "filter": [key_filter]}}
+                if key_filter
+                else keyword_query
+            )
             body = {
                 "size": top_k,
-                "query": {
-                    "multi_match": {
-                        "query": query,
-                        "fields": ["text^2", "title", "metadata.*"],
-                    }
-                },
+                "query": query_body,
             }
 
         response = client.search(index=self.settings.opensearch_index, body=body)
@@ -72,11 +89,10 @@ class RetrievalService:
     def _get_opensearch_client(self) -> Any:
         if self._opensearch is not None:
             return self._opensearch
-        import boto3
         from opensearchpy import OpenSearch, RequestsHttpConnection
         from opensearchpy import AWSV4SignerAuth
 
-        credentials = boto3.Session().get_credentials()
+        credentials = boto3_session(self.settings).get_credentials()
         auth = AWSV4SignerAuth(credentials, self.settings.aws_region, "aoss")
         host = self.settings.opensearch_endpoint.replace("https://", "").replace("http://", "")
         self._opensearch = OpenSearch(
