@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
+import secrets as py_secrets
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from .aws import boto3_client
@@ -163,3 +166,84 @@ class StaticSecretProvider(SecretProvider):
     def put_json(self, secret_name: str, value: dict[str, Any]) -> None:
         self._static_secrets[secret_name] = dict(value)
         self._cache[secret_name] = dict(value)
+
+
+class EnvSecretProvider(SecretProvider):
+    """Local-mode provider backed by environment variables and a JSON app secret file."""
+
+    def get_json(self, secret_name: str) -> dict[str, Any]:
+        if secret_name == self.settings.app_secret_name:
+            return self._load_local_app_secret()
+        if secret_name == self.settings.azure_openai_secret_name:
+            return self._azure_secret_from_env()
+        if secret_name == self.settings.langfuse_secret_name:
+            return self._langfuse_secret_from_env()
+        raise SecretProviderError(f"Local secret {secret_name!r} is not configured")
+
+    def put_json(self, secret_name: str, value: dict[str, Any]) -> None:
+        if secret_name != self.settings.app_secret_name:
+            raise SecretProviderError("Only the local app secret can be updated in local mode")
+        path = Path(self.settings.local_app_secret_file)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(value, indent=2), encoding="utf-8")
+        self._cache[secret_name] = dict(value)
+
+    def _load_local_app_secret(self) -> dict[str, Any]:
+        if self.settings.app_secret_name in self._cache:
+            return self._cache[self.settings.app_secret_name]
+        path = Path(self.settings.local_app_secret_file)
+        if path.exists():
+            try:
+                value = json.loads(path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError as exc:
+                raise SecretProviderError(f"Local app secret {str(path)!r} is not valid JSON") from exc
+            if not isinstance(value, dict):
+                raise SecretProviderError(f"Local app secret {str(path)!r} must contain a JSON object")
+        else:
+            value = self._default_local_app_secret()
+            self.put_json(self.settings.app_secret_name, value)
+        self._cache[self.settings.app_secret_name] = value
+        return value
+
+    def _default_local_app_secret(self) -> dict[str, Any]:
+        from .auth import hash_password
+
+        username = self.settings.local_test_admin_username.strip() or "admin"
+        password = self.settings.local_test_admin_password or "admin123"
+        session_secret = os.getenv("LOCAL_SESSION_SECRET") or py_secrets.token_urlsafe(32)
+        return {
+            "session_secret": session_secret,
+            "auth_users": {username: hash_password(password, iterations=1000)},
+            "user_profiles": {
+                username: {
+                    "roles": [
+                        "admin",
+                        "doctor",
+                        "nurse",
+                        "pharmacy",
+                        "clinical_governance",
+                        "manager",
+                        "staff",
+                    ],
+                    "departments": ["clinical_governance", "operations", "it", "hr", "finance"],
+                    "password_change_required": False,
+                }
+            },
+        }
+
+    def _azure_secret_from_env(self) -> dict[str, Any]:
+        chat_deployment = self.settings.azure_openai_deployment or os.getenv("AZURE_OPENAI_DEPLOYMENT", "")
+        return {
+            "endpoint": os.getenv("AZURE_OPENAI_ENDPOINT", ""),
+            "api_key": os.getenv("AZURE_OPENAI_API_KEY", ""),
+            "api_version": os.getenv("AZURE_OPENAI_API_VERSION", "2025-04-01-preview"),
+            "chat_deployment": chat_deployment,
+            "embedding_deployment": os.getenv("AZURE_OPENAI_EMBEDDING_DEPLOYMENT", ""),
+        }
+
+    def _langfuse_secret_from_env(self) -> dict[str, Any]:
+        return {
+            "public_key": os.getenv("LANGFUSE_PUBLIC_KEY", ""),
+            "secret_key": os.getenv("LANGFUSE_SECRET_KEY", ""),
+            "base_url": os.getenv("LANGFUSE_BASE_URL", ""),
+        }

@@ -15,4 +15,7 @@ htmlcov/
 ragas_report.json
 stress_report.json
 local_data/
-
+data/chroma/
+data/manifests/
+data/raw/
+graphify-out/

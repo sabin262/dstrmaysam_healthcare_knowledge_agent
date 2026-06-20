@@ -18,8 +18,9 @@ from .auth import (
 )
 from .config import AppSettings
 from .healthcare import HealthcareUserContext
-from .history import create_chat_history_repository
+from .history import InMemoryChatHistoryRepository, create_chat_history_repository
 from .ingest import IngestionJob
+from .local_chroma import LocalChromaIngestionJob, LocalChromaRetrievalService
 from .models import (
     AdminDocumentUploadResponse,
     AdminIngestionResponse,
@@ -38,8 +39,8 @@ from .models import (
 )
 from .observability import ObservabilityClient
 from .retrieval import RetrievalService
-from .secrets import SecretProvider
-from .storage import DocumentStore
+from .secrets import EnvSecretProvider, SecretProvider
+from .storage import DocumentStore, LocalDocumentStore
 
 
 SUPPORTED_UPLOAD_EXTENSIONS = {".pdf", ".docx", ".txt", ".md", ".csv"}
@@ -52,7 +53,10 @@ def get_settings() -> AppSettings:
 
 @lru_cache
 def get_secret_provider() -> SecretProvider:
-    return SecretProvider(get_settings())
+    settings = get_settings()
+    if settings.use_local_resources():
+        return EnvSecretProvider(settings)
+    return SecretProvider(settings)
 
 
 @lru_cache
@@ -62,22 +66,38 @@ def get_auth_service() -> AuthService:
 
 @lru_cache
 def get_history_repository():
-    return create_chat_history_repository(get_settings())
+    settings = get_settings()
+    if settings.use_local_resources():
+        return InMemoryChatHistoryRepository()
+    return create_chat_history_repository(settings)
 
 
 @lru_cache
 def get_document_store() -> DocumentStore:
-    return DocumentStore(get_settings())
+    settings = get_settings()
+    if settings.use_local_resources():
+        return LocalDocumentStore(settings)
+    return DocumentStore(settings)
 
 
 @lru_cache
 def get_retrieval_service() -> RetrievalService:
-    return RetrievalService(get_settings(), get_secret_provider())
+    settings = get_settings()
+    if settings.use_local_resources():
+        return LocalChromaRetrievalService(settings, get_secret_provider())
+    return RetrievalService(settings, get_secret_provider())
 
 
 @lru_cache
 def get_observability() -> ObservabilityClient:
     return ObservabilityClient(get_settings(), get_secret_provider())
+
+
+def create_ingestion_job():
+    settings = get_settings()
+    if settings.use_local_resources():
+        return LocalChromaIngestionJob(settings, get_secret_provider())
+    return IngestionJob(settings, get_secret_provider())
 
 
 @lru_cache
@@ -315,7 +335,7 @@ def ingest_admin_documents(
     user: HealthcareUserContext = Depends(admin_user_context),
 ) -> AdminIngestionResponse:
     try:
-        result = IngestionJob(get_settings(), get_secret_provider()).run()
+        result = create_ingestion_job().run()
         document_store = get_document_store()
         if hasattr(document_store, "invalidate_manifest_cache"):
             document_store.invalidate_manifest_cache()

@@ -11,8 +11,15 @@ services:
       SECRETS_STAGE: ${SECRETS_STAGE:-dev}
       APP_SECRET_NAME: ${APP_SECRET_NAME:-/dstrmaysam-healthcare-knowledge-agent/dev/app}
       AZURE_OPENAI_SECRET_NAME: ${AZURE_OPENAI_SECRET_NAME:-/dstrmaysam-healthcare-knowledge-agent/dev/azure-openai}
+      AZURE_OPENAI_ENDPOINT: ${AZURE_OPENAI_ENDPOINT:-}
+      AZURE_OPENAI_API_KEY: ${AZURE_OPENAI_API_KEY:-}
+      AZURE_OPENAI_API_VERSION: ${AZURE_OPENAI_API_VERSION:-2025-04-01-preview}
       AZURE_OPENAI_DEPLOYMENT: ${AZURE_OPENAI_DEPLOYMENT:-gpt-4.1-mini}
+      AZURE_OPENAI_EMBEDDING_DEPLOYMENT: ${AZURE_OPENAI_EMBEDDING_DEPLOYMENT:-text-embedding-3-small}
       LANGFUSE_SECRET_NAME: ${LANGFUSE_SECRET_NAME:-/dstrmaysam-healthcare-knowledge-agent/dev/langfuse}
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+      LANGFUSE_BASE_URL: ${LANGFUSE_BASE_URL:-}
       S3_BUCKET: ${S3_BUCKET:-dstrmaysam-healthcare-knowledge-agent-dev}
       S3_RAW_PREFIX: ${S3_RAW_PREFIX:-raw/}
       S3_MANIFEST_KEY: ${S3_MANIFEST_KEY:-manifests/documents.json}
@@ -33,9 +40,15 @@ services:
       RAG_EXACT_KEYWORD_ONLY: ${RAG_EXACT_KEYWORD_ONLY:-true}
       RAG_PARALLEL_SEARCH_ENABLED: ${RAG_PARALLEL_SEARCH_ENABLED:-true}
       CHAT_BACKGROUND_HISTORY_SAVE_ENABLED: ${CHAT_BACKGROUND_HISTORY_SAVE_ENABLED:-true}
+      LOCAL_DATA_DIR: ${LOCAL_DATA_DIR:-/app/data}
+      CHROMA_PERSIST_DIR: ${CHROMA_PERSIST_DIR:-/app/data/chroma}
+      CHROMA_COLLECTION: ${CHROMA_COLLECTION:-dstrmaysam-healthcare-knowledge-agent}
+      LOCAL_APP_SECRET_FILE: ${LOCAL_APP_SECRET_FILE:-/app/data/local_app_secret.json}
       LOCAL_TEST_ADMIN_ENABLED: ${LOCAL_TEST_ADMIN_ENABLED:-true}
       LOCAL_TEST_ADMIN_USERNAME: ${LOCAL_TEST_ADMIN_USERNAME:-admin}
       LOCAL_TEST_ADMIN_PASSWORD: ${LOCAL_TEST_ADMIN_PASSWORD:-admin123}
+    volumes:
+      - ./data:/app/data
     ports:
       - "8000:8000"
 
