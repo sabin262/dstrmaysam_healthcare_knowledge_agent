@@ -17,6 +17,7 @@ from .auth import (
     UserManagementError,
 )
 from .config import AppSettings
+from .deterministic_lookup import DeterministicLookupService
 from .healthcare import HealthcareUserContext
 from .history import InMemoryChatHistoryRepository, create_chat_history_repository
 from .ingest import IngestionJob
@@ -86,6 +87,11 @@ def get_retrieval_service() -> RetrievalService:
     if settings.use_local_resources():
         return LocalChromaRetrievalService(settings, get_secret_provider())
     return RetrievalService(settings, get_secret_provider())
+
+
+@lru_cache
+def get_deterministic_lookup_service() -> DeterministicLookupService:
+    return DeterministicLookupService(get_settings())
 
 
 @lru_cache
@@ -366,6 +372,9 @@ def admin_dashboard(
     user_counts: dict[str, int] = {}
     model_counts: dict[str, int] = {}
     latencies: list[int] = []
+    input_tokens: list[int] = []
+    output_tokens: list[int] = []
+    total_tokens: list[int] = []
     guardrail_count = 0
     total_sources = 0
 
@@ -375,6 +384,9 @@ def admin_dashboard(
         tools_used = [str(tool) for tool in metadata.get("tools_used", [])]
         sources = metadata.get("sources", []) if isinstance(metadata.get("sources"), list) else []
         latency_ms = int(metadata.get("latency_ms") or performance.get("total_ms") or 0)
+        input_token_count = int(metadata.get("input_tokens") or 0)
+        output_token_count = int(metadata.get("output_tokens") or 0)
+        total_token_count = input_token_count + output_token_count
         model = str(metadata.get("model") or get_settings().azure_openai_deployment or "unknown")
         guardrail_applied = bool(metadata.get("guardrail_applied") or performance.get("response_guardrail_applied"))
 
@@ -383,6 +395,12 @@ def admin_dashboard(
         total_sources += len(sources)
         if latency_ms:
             latencies.append(latency_ms)
+        if input_token_count:
+            input_tokens.append(input_token_count)
+        if output_token_count:
+            output_tokens.append(output_token_count)
+        if total_token_count:
+            total_tokens.append(total_token_count)
         if guardrail_applied:
             guardrail_count += 1
         for tool in tools_used:
@@ -401,8 +419,9 @@ def admin_dashboard(
                 "source_count": len(sources),
                 "source_document_keys": metadata.get("source_document_keys", []),
                 "latency_ms": latency_ms,
-                "input_tokens": metadata.get("input_tokens"),
-                "output_tokens": metadata.get("output_tokens"),
+                "input_tokens": input_token_count,
+                "output_tokens": output_token_count,
+                "total_tokens": total_token_count,
                 "agent_mode": performance.get("agent_mode"),
                 "guardrail_applied": guardrail_applied,
                 "guardrail_reason": metadata.get("guardrail_reason") or performance.get("response_guardrail_reason"),
@@ -415,6 +434,9 @@ def admin_dashboard(
         "unique_users": len(user_counts),
         "avg_latency_ms": int(sum(latencies) / len(latencies)) if latencies else 0,
         "max_latency_ms": max(latencies) if latencies else 0,
+        "avg_input_tokens": int(sum(input_tokens) / len(input_tokens)) if input_tokens else 0,
+        "avg_output_tokens": int(sum(output_tokens) / len(output_tokens)) if output_tokens else 0,
+        "avg_total_tokens": int(sum(total_tokens) / len(total_tokens)) if total_tokens else 0,
         "avg_sources_per_query": (total_sources / len(rows)) if rows else 0,
         "guardrail_trigger_count": guardrail_count,
         "tool_counts": tool_counts,
@@ -422,6 +444,32 @@ def admin_dashboard(
         "model_counts": model_counts,
     }
     return {"summary": summary, "queries": rows}
+
+
+@app.get("/admin/patient-details")
+def admin_patient_details(
+    q: str = Query(default="", max_length=100),
+    patient_identifier: str = Query(default="", max_length=80),
+    department: str = Query(default="", max_length=100),
+    ward: str = Query(default="", max_length=50),
+    care_status: str = Query(default="", max_length=80),
+    tables: list[str] = Query(default=[]),
+    limit: int = Query(default=50, ge=1, le=250),
+    user: HealthcareUserContext = Depends(admin_user_context),
+) -> dict[str, object]:
+    try:
+        return get_deterministic_lookup_service().patient_dashboard(
+            user=user,
+            query=q,
+            patient_identifier=patient_identifier,
+            department=department,
+            ward=ward,
+            care_status=care_status,
+            tables=tables,
+            limit=limit,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
 
 
 @app.post("/chat", response_model=ChatResponse)

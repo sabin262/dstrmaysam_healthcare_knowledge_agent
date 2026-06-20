@@ -60,8 +60,8 @@ def patch_json(path: str, payload: dict[str, Any]) -> dict[str, Any]:
     return response.json()
 
 
-def get_json(path: str) -> dict[str, Any] | list[dict[str, Any]]:
-    response = requests.get(f"{BACKEND_URL}{path}", headers=api_headers(), timeout=30)
+def get_json(path: str, params: dict[str, Any] | None = None) -> dict[str, Any] | list[dict[str, Any]]:
+    response = requests.get(f"{BACKEND_URL}{path}", params=params, headers=api_headers(), timeout=30)
     raise_for_api_error(response)
     return response.json()
 
@@ -95,33 +95,6 @@ def parse_departments(raw: str) -> list[str]:
         if value and value not in departments:
             departments.append(value)
     return departments
-
-
-def select_navigation(options: list[str]) -> str:
-    current = st.session_state.get("selected_view", options[0])
-    if current not in options:
-        current = options[0]
-    if hasattr(st, "segmented_control"):
-        selected = st.segmented_control(
-            "Navigation",
-            options,
-            default=current,
-            key="selected-view-segment",
-        )
-        st.session_state.selected_view = selected or current
-        return st.session_state.selected_view
-
-    st.caption("Navigation")
-    for option in options:
-        if st.button(
-            option,
-            key=f"nav-{option}",
-            use_container_width=True,
-            type="primary" if option == current else "secondary",
-        ):
-            st.session_state.selected_view = option
-            st.rerun()
-    return current
 
 
 def render_password_change() -> None:
@@ -262,13 +235,14 @@ def render_admin_dashboard() -> None:
 
     summary = payload.get("summary") or {}
     queries = payload.get("queries") or []
-    metric_columns = st.columns(6)
+    metric_columns = st.columns(7)
     metric_columns[0].metric("Queries", summary.get("total_queries", 0))
     metric_columns[1].metric("Users", summary.get("unique_users", 0))
     metric_columns[2].metric("Avg latency", f"{summary.get('avg_latency_ms', 0)} ms")
     metric_columns[3].metric("Max latency", f"{summary.get('max_latency_ms', 0)} ms")
-    metric_columns[4].metric("Avg sources", f"{float(summary.get('avg_sources_per_query', 0)):.1f}")
-    metric_columns[5].metric("Guardrails", summary.get("guardrail_trigger_count", 0))
+    metric_columns[4].metric("Avg tokens", summary.get("avg_total_tokens", 0))
+    metric_columns[5].metric("Avg sources", f"{float(summary.get('avg_sources_per_query', 0)):.1f}")
+    metric_columns[6].metric("Guardrails", summary.get("guardrail_trigger_count", 0))
 
     st.divider()
     chart_columns = st.columns(3)
@@ -307,6 +281,7 @@ def render_admin_dashboard() -> None:
                 "Model": item.get("model", ""),
                 "Tools": ", ".join(tools),
                 "Sources": item.get("source_count", 0),
+                "Tokens": item.get("total_tokens", 0),
                 "Latency ms": item.get("latency_ms", 0),
                 "Trace": item.get("trace_id", ""),
                 "Guardrail": item.get("guardrail_applied", False),
@@ -320,11 +295,12 @@ def render_admin_dashboard() -> None:
     for index, item in enumerate(queries[:25]):
         label = f"{item.get('user_id', 'user')} - {str(item.get('query', ''))[:80]}"
         with st.expander(label):
-            detail_columns = st.columns(4)
+            detail_columns = st.columns(5)
             detail_columns[0].metric("Latency", f"{item.get('latency_ms', 0)} ms")
             detail_columns[1].metric("Sources", item.get("source_count", 0))
             detail_columns[2].metric("Input tokens", item.get("input_tokens") or 0)
             detail_columns[3].metric("Output tokens", item.get("output_tokens") or 0)
+            detail_columns[4].metric("Total tokens", item.get("total_tokens") or 0)
             st.caption(f"Trace ID: {item.get('trace_id') or 'unavailable'}")
             st.caption(f"Session ID: {item.get('session_id')}")
             st.markdown("**Question**")
@@ -342,6 +318,95 @@ def render_admin_dashboard() -> None:
                     "safety": item.get("safety", {}),
                 }
             )
+
+
+def patient_detail_table_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    table_rows = []
+    for row in rows:
+        appointment_parts = [
+            str(row.get("appointment_date") or ""),
+            str(row.get("appointment_time") or ""),
+        ]
+        appointment = " ".join(part for part in appointment_parts if part).strip()
+        table_rows.append(
+            {
+                "Table": row.get("table", ""),
+                "Patient ID": row.get("patient_id", ""),
+                "MRN": row.get("mrn", ""),
+                "Name": row.get("patient_name", ""),
+                "DOB": row.get("date_of_birth", ""),
+                "Department": row.get("department_name", ""),
+                "Ward": row.get("ward_code", ""),
+                "Care status": row.get("care_status", ""),
+                "Risk flags": row.get("risk_flags", ""),
+                "Appointment": appointment,
+                "Clinic": row.get("clinic_name", ""),
+                "Clinician": row.get("clinician_name") or row.get("named_consultant", ""),
+                "Status": row.get("status", ""),
+            }
+        )
+    return table_rows
+
+
+def render_patient_details_dashboard() -> None:
+    st.header("Patient Details")
+    with st.form("patient-details-filters"):
+        first_row = st.columns([2, 1, 1])
+        query = first_row[0].text_input("Search", placeholder="Name, MRN, NHS number, consultant, clinic")
+        patient_identifier = first_row[1].text_input("Patient ID / MRN / NHS")
+        limit = first_row[2].number_input("Limit", min_value=1, max_value=250, value=50, step=10)
+
+        second_row = st.columns([1, 1, 1, 1])
+        department = second_row[0].text_input("Department")
+        ward = second_row[1].text_input("Ward")
+        care_status = second_row[2].text_input("Care status")
+        selected_tables = second_row[3].multiselect(
+            "Tables",
+            ["patients", "appointments"],
+            default=["patients", "appointments"],
+        )
+        submitted = st.form_submit_button("Apply filters")
+
+    if submitted or "patient_details_payload" not in st.session_state:
+        params = {
+            "q": query,
+            "patient_identifier": patient_identifier,
+            "department": department,
+            "ward": ward,
+            "care_status": care_status,
+            "tables": selected_tables,
+            "limit": int(limit),
+        }
+        try:
+            payload = get_json("/admin/patient-details", params=params)
+            st.session_state.patient_details_payload = payload if isinstance(payload, dict) else {}
+            st.session_state.patient_details_error = None
+        except Exception as exc:
+            st.session_state.patient_details_payload = {}
+            st.session_state.patient_details_error = str(exc)
+
+    if st.session_state.get("patient_details_error"):
+        st.error(f"Unable to load patient details: {st.session_state.patient_details_error}")
+        return
+
+    payload = st.session_state.get("patient_details_payload") or {}
+    summary = payload.get("summary") or {}
+    rows = payload.get("rows") or []
+    metric_columns = st.columns(4)
+    metric_columns[0].metric("Rows", summary.get("row_count", 0))
+    metric_columns[1].metric("Patients", summary.get("unique_patients", 0))
+    metric_columns[2].metric("Patient records", (summary.get("table_counts") or {}).get("patients", 0))
+    metric_columns[3].metric("Appointments", (summary.get("table_counts") or {}).get("appointments", 0))
+
+    st.caption(f"Access scopes applied: {', '.join(payload.get('access_scopes_applied') or [])}")
+    table_rows = patient_detail_table_rows(rows)
+    if table_rows:
+        st.dataframe(table_rows, hide_index=True, use_container_width=True)
+    else:
+        st.info(summary.get("message") or "No matching patient rows found.")
+
+    with st.expander("Raw database rows"):
+        st.json(rows)
 
 
 def document_table_rows(documents: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -466,6 +531,73 @@ def render_response_details(metadata: dict[str, Any]) -> None:
     st.json(metadata)
 
 
+def submit_chat_query(query: str) -> None:
+    payload = {"query": query, "session_id": st.session_state.get("session_id")}
+    data = post_json("/chat", payload)
+    st.session_state.session_id = data["session_id"]
+    metadata = {
+        "sources": data.get("sources", []),
+        "tools_used": data.get("tools_used", []),
+        "input_tokens": data.get("input_tokens"),
+        "output_tokens": data.get("output_tokens"),
+        "latency_ms": data.get("latency_ms"),
+        "trace_id": data.get("trace_id"),
+        "safety": data.get("safety", {}),
+        "audit_event": data.get("audit_event", {}),
+        "performance": data.get("performance", {}),
+    }
+    st.session_state.messages.append(
+        {"role": "assistant", "content": data["answer"], "metadata": metadata}
+    )
+
+
+def render_chat_messages(show_thinking: bool = False) -> None:
+    with st.container(height=620, border=True):
+        messages = st.session_state.get("messages", [])
+        if not messages:
+            st.info("Ask a question about healthcare knowledge.")
+        for message in messages:
+            role = "assistant" if message.get("role") == "assistant" else "user"
+            with st.chat_message(role):
+                st.markdown(message.get("content", ""))
+                metadata = message.get("metadata") or {}
+                if role == "assistant" and metadata:
+                    with st.expander("Response details"):
+                        render_response_details(metadata)
+        if show_thinking:
+            with st.chat_message("assistant"):
+                with st.spinner("Thinking with knowledge context..."):
+                    st.write("Preparing answer...")
+
+
+def render_chat_page() -> None:
+    chat_window = st.empty()
+    with chat_window:
+        render_chat_messages()
+
+    with st.form("chat-query-form", clear_on_submit=True):
+        input_columns = st.columns([8, 1])
+        query = input_columns[0].text_input(
+            "Message",
+            placeholder="Ask a question about healthcare knowledge",
+            label_visibility="collapsed",
+        )
+        submitted = input_columns[1].form_submit_button("Send", use_container_width=True)
+
+    if submitted:
+        cleaned_query = query.strip()
+        if not cleaned_query:
+            return
+        st.session_state.setdefault("messages", []).append({"role": "user", "content": cleaned_query})
+        with chat_window:
+            render_chat_messages(show_thinking=True)
+        try:
+            submit_chat_query(cleaned_query)
+            st.rerun()
+        except Exception as exc:
+            st.error(f"Chat failed: {exc}")
+
+
 st.set_page_config(page_title="Dstrmaysam Healthcare Knowledge Agent", page_icon=None, layout="wide")
 st.title("Dstrmaysam Healthcare Knowledge Agent")
 
@@ -498,10 +630,7 @@ if st.session_state.get("password_change_required"):
 
 with st.sidebar:
     st.caption(f"Signed in as {st.session_state.get('username') or 'user'}")
-    selected_view = "Chat"
-    if "admin" in st.session_state.get("roles", []):
-        selected_view = select_navigation(["Chat", "Dashboard", "Users", "Documents"])
-    if selected_view == "Chat" and st.button("New chat"):
+    if st.button("New chat"):
         st.session_state.session_id = None
         st.session_state.messages = []
         st.rerun()
@@ -509,71 +638,34 @@ with st.sidebar:
         st.session_state.clear()
         st.rerun()
 
-    if selected_view == "Chat":
-        try:
-            sessions = get_json("/chat/sessions")
-            if sessions:
-                st.divider()
-                st.caption("Previous chats")
-                for session in sessions[:20]:
-                    label = session.get("title") or session["session_id"]
-                    if st.button(label, key=f"session-{session['session_id']}"):
-                        detail = get_json(f"/chat/sessions/{session['session_id']}")
-                        st.session_state.session_id = session["session_id"]
-                        st.session_state.messages = detail.get("messages", [])
-                        st.rerun()
-        except Exception:
-            st.caption("Chat history unavailable")
+    try:
+        sessions = get_json("/chat/sessions")
+        if sessions:
+            st.divider()
+            st.caption("Previous chats")
+            for session in sessions[:20]:
+                label = session.get("title") or session["session_id"]
+                if st.button(label, key=f"session-{session['session_id']}"):
+                    detail = get_json(f"/chat/sessions/{session['session_id']}")
+                    st.session_state.session_id = session["session_id"]
+                    st.session_state.messages = detail.get("messages", [])
+                    st.rerun()
+    except Exception:
+        st.caption("Chat history unavailable")
 
-if selected_view == "Dashboard":
-    render_admin_dashboard()
-    st.stop()
-
-if selected_view == "Users":
-    render_admin_users()
-    st.stop()
-
-if selected_view == "Documents":
-    render_admin_documents()
-    st.stop()
-
-for message in st.session_state.get("messages", []):
-    role = "assistant" if message.get("role") == "assistant" else "user"
-    with st.chat_message(role):
-        st.markdown(message.get("content", ""))
-        metadata = message.get("metadata") or {}
-        if role == "assistant" and metadata:
-            with st.expander("Response details"):
-                render_response_details(metadata)
-
-query = st.chat_input("Ask a question about healthcare knowledge")
-if query:
-    st.session_state.setdefault("messages", []).append({"role": "user", "content": query})
-    with st.chat_message("user"):
-        st.markdown(query)
-
-    with st.chat_message("assistant"):
-        with st.spinner("Thinking with knowledge context..."):
-            try:
-                payload = {"query": query, "session_id": st.session_state.get("session_id")}
-                data = post_json("/chat", payload)
-                st.session_state.session_id = data["session_id"]
-                metadata = {
-                    "sources": data.get("sources", []),
-                    "tools_used": data.get("tools_used", []),
-                    "input_tokens": data.get("input_tokens"),
-                    "output_tokens": data.get("output_tokens"),
-                    "latency_ms": data.get("latency_ms"),
-                    "trace_id": data.get("trace_id"),
-                    "safety": data.get("safety", {}),
-                    "audit_event": data.get("audit_event", {}),
-                    "performance": data.get("performance", {}),
-                }
-                st.markdown(data["answer"])
-                with st.expander("Response details"):
-                    render_response_details(metadata)
-                st.session_state.messages.append(
-                    {"role": "assistant", "content": data["answer"], "metadata": metadata}
-                )
-            except Exception as exc:
-                st.error(f"Chat failed: {exc}")
+if "admin" in st.session_state.get("roles", []):
+    chat_tab, dashboard_tab, patient_tab, users_tab, documents_tab = st.tabs(
+        ["Chat", "Dashboard", "Patient Details", "Users", "Documents"]
+    )
+    with chat_tab:
+        render_chat_page()
+    with dashboard_tab:
+        render_admin_dashboard()
+    with patient_tab:
+        render_patient_details_dashboard()
+    with users_tab:
+        render_admin_users()
+    with documents_tab:
+        render_admin_documents()
+else:
+    render_chat_page()
