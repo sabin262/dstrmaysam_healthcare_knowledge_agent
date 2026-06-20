@@ -20,6 +20,8 @@ class DocumentRecord:
     key: str
     content_type: str
     metadata: dict[str, Any]
+    chunk_count: int = 0
+    ingestion_status: str = ""
 
 
 class DocumentStore:
@@ -49,6 +51,8 @@ class DocumentStore:
                     key=key,
                     content_type=str(record.get("content_type", "")),
                     metadata=dict(record.get("metadata", {})),
+                    chunk_count=int(record.get("chunk_count") or 0),
+                    ingestion_status=str(record.get("ingestion_status") or ""),
                 )
             )
         return output
@@ -139,6 +143,8 @@ class LocalDocumentStore(DocumentStore):
                     key=key,
                     content_type=str(record.get("content_type", "")),
                     metadata=dict(record.get("metadata", {})),
+                    chunk_count=int(record.get("chunk_count") or 0),
+                    ingestion_status=str(record.get("ingestion_status") or ""),
                 )
             )
         return output

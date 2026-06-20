@@ -199,8 +199,49 @@ def render_admin_users() -> None:
                     st.error(f"Password reset failed: {exc}")
 
 
+def document_table_rows(documents: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows = []
+    for document in documents:
+        metadata = document.get("metadata") or {}
+        key = document.get("key") or str(document.get("uri", "")).split("/", 3)[-1]
+        rows.append(
+            {
+                "File": document.get("title") or str(key).rsplit("/", 1)[-1],
+                "Key": key,
+                "Chunks": document.get("chunk_count", 0),
+                "Category": metadata.get("domain", "general"),
+                "Type": metadata.get("document_type", "document"),
+                "Status": document.get("ingestion_status") or "indexed",
+                "URI": document.get("uri", ""),
+            }
+        )
+    return rows
+
+
+def render_documents_table(documents: list[dict[str, Any]]) -> None:
+    rows = document_table_rows(documents)
+    st.subheader("Indexed documents")
+    if not rows:
+        st.info("No indexed documents found. Upload files and run ingestion to create searchable chunks.")
+        return
+    metric_columns = st.columns(3)
+    metric_columns[0].metric("Documents", len(rows))
+    metric_columns[1].metric("Total chunks", sum(int(row.get("Chunks") or 0) for row in rows))
+    metric_columns[2].metric(
+        "Categories",
+        len({str(row.get("Category") or "general") for row in rows}),
+    )
+    st.dataframe(rows, hide_index=True, use_container_width=True)
+
+
 def render_admin_documents() -> None:
     st.header("Documents")
+    current_documents: list[dict[str, Any]] = []
+    try:
+        current_documents = list(get_json("/documents"))
+    except Exception as exc:
+        st.error(f"Unable to load indexed documents: {exc}")
+
     uploaded_files = st.file_uploader(
         "Upload documents to S3",
         type=["pdf", "docx", "txt", "md", "csv"],
@@ -225,6 +266,8 @@ def render_admin_documents() -> None:
             st.success(f"Uploaded {uploaded_count} file(s)")
 
     st.divider()
+    render_documents_table(current_documents)
+    st.divider()
     st.subheader("Ingest and index")
     if st.button("Run ingestion and indexing"):
         with st.spinner("Ingesting S3 documents and updating the search index..."):
@@ -237,22 +280,7 @@ def render_admin_documents() -> None:
                 metric_columns[2].metric("Total chunks", result.get("total_chunks", 0))
                 metric_columns[3].metric("Skipped", result.get("skipped_documents", 0))
                 metric_columns[4].metric("Removed", result.get("deleted_documents", 0))
-
-                document_rows = []
-                for document in result.get("documents", []):
-                    metadata = document.get("metadata") or {}
-                    document_rows.append(
-                        {
-                            "File": document.get("title") or str(document.get("key", "")).rsplit("/", 1)[-1],
-                            "S3 key": document.get("key", ""),
-                            "Chunks": document.get("chunk_count", 0),
-                            "Category": metadata.get("domain", "general"),
-                            "Type": metadata.get("document_type", "document"),
-                            "Status": document.get("ingestion_status", "indexed"),
-                        }
-                    )
-                if document_rows:
-                    st.dataframe(document_rows, hide_index=True, use_container_width=True)
+                render_documents_table(list(result.get("documents", [])))
                 if result.get("force_reindex"):
                     st.caption(
                         "Re-indexed unchanged files because the OpenSearch index changed "

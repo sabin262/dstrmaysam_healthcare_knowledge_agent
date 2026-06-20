@@ -188,9 +188,9 @@ class LocalModeTests(unittest.TestCase):
     def test_local_chroma_ingestion_indexes_and_skips_unchanged_files(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             app_settings = settings(local_data_dir=tmpdir)
-            raw_path = Path(tmpdir) / "raw" / "lease.txt"
+            raw_path = Path(tmpdir) / "raw" / "policy.txt"
             raw_path.parent.mkdir(parents=True)
-            raw_path.write_text("Monthly rent: GBP 1,850 per month.", encoding="utf-8")
+            raw_path.write_text("Staff policy requires annual review.", encoding="utf-8")
             collection = FakeCollection()
             job = LocalChromaIngestionJob(app_settings, StaticSecretProvider(app_settings, {}))
             job._collection = collection
@@ -206,30 +206,30 @@ class LocalModeTests(unittest.TestCase):
             self.assertTrue((Path(tmpdir) / "manifests" / "documents.json").exists())
 
     def test_local_chroma_retrieval_returns_hits_and_neighbors(self):
-        app_settings = settings(rag_top_k=1, rag_neighbor_chunks=1, rag_exact_keyword_only=False)
+        app_settings = settings(rag_top_k=1, rag_neighbor_chunks=1)
         collection = FakeCollection()
         collection.upsert(
-            ids=["lease:0", "lease:1"],
-            documents=["Lease heading.", "Monthly rent: GBP 1,850 per month."],
+            ids=["policy:0", "policy:1"],
+            documents=["Policy heading.", "Staff policy requires annual review."],
             embeddings=[[0.1], [0.2]],
             metadatas=[
                 {
-                    "key": "raw/lease.txt",
-                    "title": "lease.txt",
-                    "uri": "local://raw/lease.txt",
+                    "key": "raw/policy.txt",
+                    "title": "policy.txt",
+                    "uri": "local://raw/policy.txt",
                     "chunk_index": 0,
                     "content_type": "text/plain",
                     "checksum": "abc",
                     "metadata_json": json.dumps({"domain": "general"}),
                 },
                 {
-                    "key": "raw/lease.txt",
-                    "title": "lease.txt",
-                    "uri": "local://raw/lease.txt",
+                    "key": "raw/policy.txt",
+                    "title": "policy.txt",
+                    "uri": "local://raw/policy.txt",
                     "chunk_index": 1,
                     "content_type": "text/plain",
                     "checksum": "abc",
-                    "metadata_json": json.dumps({"facts": {"rent_amount": "GBP 1,850 per month"}}),
+                    "metadata_json": json.dumps({"domain": "admin_policy", "document_type": "policy"}),
                 },
             ],
         )
@@ -237,10 +237,10 @@ class LocalModeTests(unittest.TestCase):
         service._collection = collection
         service._embed = lambda text: [0.1]
 
-        hits = service.search("rent for lease", document_keys=["raw/lease.txt"])
+        hits = service.search("policy review", document_keys=["raw/policy.txt"])
 
-        self.assertEqual(hits[0].uri, "local://raw/lease.txt")
-        self.assertTrue(any(hit.metadata.get("facts", {}).get("rent_amount") for hit in hits))
+        self.assertEqual(hits[0].uri, "local://raw/policy.txt")
+        self.assertTrue(any(hit.metadata.get("document_type") == "policy" for hit in hits))
         self.assertTrue(any(hit.metadata.get("_retrieval_strategy") == "neighbor" for hit in hits))
 
 

@@ -403,9 +403,12 @@ def documents(user: HealthcareUserContext = Depends(active_user_context)) -> lis
     return [
         {
             "title": document.title,
+            "key": document.key,
             "uri": document.uri,
             "content_type": document.content_type,
             "metadata": document.metadata,
+            "chunk_count": document.chunk_count,
+            "ingestion_status": document.ingestion_status,
         }
         for document in agent.access.filter_documents(user, get_document_store().list_documents())
     ]

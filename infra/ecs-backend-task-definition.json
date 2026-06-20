@@ -41,8 +41,6 @@
         {"name": "RAG_NEIGHBOR_CHUNKS", "value": "1"},
         {"name": "INGESTION_CHUNK_SIZE", "value": "1500"},
         {"name": "INGESTION_CHUNK_OVERLAP", "value": "250"},
-        {"name": "EXACT_FACT_ANSWERS_ENABLED", "value": "true"},
-        {"name": "RAG_EXACT_KEYWORD_ONLY", "value": "true"},
         {"name": "RAG_PARALLEL_SEARCH_ENABLED", "value": "true"},
         {"name": "CHAT_BACKGROUND_HISTORY_SAVE_ENABLED", "value": "true"},
         {"name": "LOCAL_TEST_ADMIN_ENABLED", "value": "false"}

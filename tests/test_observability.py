@@ -66,6 +66,36 @@ class ObservabilityCacheTests(unittest.TestCase):
 
         self.assertEqual(observability.system_prompt(), ("stale prompt", "v0"))
 
+    def test_system_prompt_fallback_is_not_mutated_by_response_guardrails(self):
+        app_settings = settings()
+        observability = ObservabilityClient(
+            app_settings,
+            StaticSecretProvider(app_settings, {"/test/app": {"session_secret": "secret"}}),
+        )
+
+        prompt, version = observability.system_prompt()
+
+        self.assertIsNone(version)
+        self.assertIn("Dstrmaysam Healthcare Knowledge Agent", prompt)
+        self.assertNotIn("Response guardrails:", prompt)
+
+    def test_system_prompt_cache_returns_stored_prompt_unchanged(self):
+        app_settings = settings(langfuse_prompt_cache_ttl_seconds=300)
+        observability = ObservabilityClient(
+            app_settings,
+            StaticSecretProvider(app_settings, {"/test/app": {"session_secret": "secret"}}),
+        )
+        observability._system_prompt_cache = (
+            "cached system prompt",
+            "v1",
+            999999999,
+        )
+
+        prompt, version = observability.system_prompt()
+
+        self.assertEqual(version, "v1")
+        self.assertEqual(prompt, "cached system prompt")
+
 
 if __name__ == "__main__":
     unittest.main()

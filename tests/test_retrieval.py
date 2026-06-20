@@ -74,7 +74,7 @@ class RetrievalQueryTests(unittest.TestCase):
             [{"terms": {"key": ["raw/leave.md"]}}],
         )
         self.assertEqual(body["query"]["bool"]["must"][0]["multi_match"]["query"], "leave policy")
-        self.assertIn("metadata.facts.*^5", body["query"]["bool"]["must"][0]["multi_match"]["fields"])
+        self.assertNotIn("metadata.facts.*^5", body["query"]["bool"]["must"][0]["multi_match"]["fields"])
 
     def test_search_without_document_keys_preserves_broad_query_shape(self):
         service = self.make_service(None)
@@ -85,24 +85,6 @@ class RetrievalQueryTests(unittest.TestCase):
         self.assertIn("multi_match", body["query"])
         self.assertNotIn("bool", body["query"])
 
-    def test_exact_fact_query_skips_embedding_and_uses_keyword_search(self):
-        app_settings = settings(rag_exact_keyword_only=True, rag_neighbor_chunks=0)
-        service = RetrievalService(
-            app_settings,
-            StaticSecretProvider(app_settings, {"/test/app": {"session_secret": "secret"}}),
-        )
-        service._opensearch = FakeOpenSearchClient()
-        embed_calls = []
-        service._embed_query = lambda query: embed_calls.append(query) or [0.1, 0.2, 0.3]
-
-        service.search("What is the rent amount for Brighton lease?")
-
-        self.assertEqual(embed_calls, [])
-        self.assertEqual(len(service._opensearch.search_calls), 1)
-        body = service._opensearch.search_calls[-1]["body"]
-        self.assertIn("multi_match", body["query"])
-        self.assertEqual(service.last_timing_ms["exact_keyword_only"], 1)
-
     def test_vector_search_merges_keyword_results_and_fetches_neighbors(self):
         responses = [
             {
@@ -111,10 +93,10 @@ class RetrievalQueryTests(unittest.TestCase):
                         {
                             "_score": 0.9,
                             "_source": {
-                                "key": "raw/lease.md",
-                                "title": "lease.md",
-                                "uri": "s3://bucket/raw/lease.md",
-                                "text": "The Brighton lease mentions rent.",
+                                "key": "raw/policy.md",
+                                "title": "policy.md",
+                                "uri": "s3://bucket/raw/policy.md",
+                                "text": "The policy describes staff responsibilities.",
                                 "chunk_index": 2,
                                 "metadata": {"domain": "general"},
                             },
@@ -128,12 +110,12 @@ class RetrievalQueryTests(unittest.TestCase):
                         {
                             "_score": 1.1,
                             "_source": {
-                                "key": "raw/lease.md",
-                                "title": "lease.md",
-                                "uri": "s3://bucket/raw/lease.md",
-                                "text": "Rent is GBP 1,850 per month.",
+                                "key": "raw/policy.md",
+                                "title": "policy.md",
+                                "uri": "s3://bucket/raw/policy.md",
+                                "text": "The policy review date is listed in the source.",
                                 "chunk_index": 3,
-                                "metadata": {"facts": {"rent_amount": "GBP 1,850 per month"}},
+                                "metadata": {"domain": "admin_policy", "document_type": "policy"},
                             },
                         }
                     ]
@@ -145,10 +127,10 @@ class RetrievalQueryTests(unittest.TestCase):
                         {
                             "_score": 0.1,
                             "_source": {
-                                "key": "raw/lease.md",
-                                "title": "lease.md",
-                                "uri": "s3://bucket/raw/lease.md",
-                                "text": "Neighbor context before rent.",
+                                "key": "raw/policy.md",
+                                "title": "policy.md",
+                                "uri": "s3://bucket/raw/policy.md",
+                                "text": "Neighbor context before the policy review.",
                                 "chunk_index": 1,
                                 "metadata": {"domain": "general"},
                             },
@@ -157,7 +139,7 @@ class RetrievalQueryTests(unittest.TestCase):
                 }
             },
         ]
-        app_settings = settings(rag_top_k=10, rag_neighbor_chunks=1, rag_exact_keyword_only=False)
+        app_settings = settings(rag_top_k=10, rag_neighbor_chunks=1)
         service = RetrievalService(
             app_settings,
             StaticSecretProvider(app_settings, {"/test/app": {"session_secret": "secret"}}),
@@ -165,15 +147,15 @@ class RetrievalQueryTests(unittest.TestCase):
         service._opensearch = FakeOpenSearchClient(responses)
         service._embed_query = lambda query: [0.1, 0.2, 0.3]
 
-        hits = service.search("What is the Brighton lease rent?")
+        hits = service.search("What does the staff policy say?")
 
         self.assertEqual(len(service._opensearch.search_calls), 3)
         self.assertEqual([hit.metadata["_chunk_index"] for hit in hits], [2, 3, 1])
         self.assertEqual(
             service._opensearch.search_calls[2]["body"]["query"]["bool"]["filter"],
-            [{"term": {"key": "raw/lease.md"}}, {"terms": {"chunk_index": [1, 4]}}],
+            [{"term": {"key": "raw/policy.md"}}, {"terms": {"chunk_index": [1, 4]}}],
         )
-        self.assertEqual(hits[1].metadata["facts"]["rent_amount"], "GBP 1,850 per month")
+        self.assertEqual(hits[1].metadata["document_type"], "policy")
         self.assertEqual(service.last_timing_ms["vector_hits"], 1)
         self.assertEqual(service.last_timing_ms["keyword_hits"], 1)
         self.assertEqual(service.last_timing_ms["neighbor_hits"], 1)

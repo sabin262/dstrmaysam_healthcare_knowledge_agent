@@ -83,15 +83,16 @@ def make_job(s3, opensearch=None, app_settings=None):
 
 
 class IncrementalIngestionTests(unittest.TestCase):
-    def test_parse_document_extracts_lease_rent_fact_from_readable_text(self):
+    def test_parse_document_returns_generic_metadata_without_extracted_facts(self):
         document = parse_document(
-            "raw/mock_lease_d_brighton_seafront_flat.txt",
-            b"Lease Agreement. Property address: 12 Brighton Seafront. Monthly rent: GBP 1,850 per month. Deposit: GBP 2,000.",
+            "raw/hr_leave_policy.txt",
+            b"HR leave policy. Employees should follow the return-to-work review process.",
         )
 
-        self.assertEqual(document.metadata["facts"]["rent_amount"], "GBP 1,850 per month")
-        self.assertEqual(document.metadata["facts"]["deposit_amount"], "GBP 2,000")
-        self.assertIn("Brighton Seafront", document.metadata["facts"]["property_address"])
+        self.assertEqual(document.content_type, "text/plain")
+        self.assertEqual(document.metadata["domain"], "admin_policy")
+        self.assertEqual(document.metadata["document_type"], "policy")
+        self.assertNotIn("facts", document.metadata)
 
     def test_chunk_text_honors_configured_size_and_overlap(self):
         chunks = chunk_text("abcdefghij" * 200, chunk_size=500, chunk_overlap=100)

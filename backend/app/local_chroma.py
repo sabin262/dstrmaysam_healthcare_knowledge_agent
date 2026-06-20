@@ -273,7 +273,7 @@ class LocalChromaRetrievalService(LocalChromaEmbeddingMixin, LocalChromaCollecti
         result_limit = top_k or self.settings.rag_top_k
         collection = self._get_collection()
         filtered_keys = list(dict.fromkeys(key for key in (document_keys or []) if key))
-        vector = None if self._is_exact_fact_query(query) else self._embed(query)
+        vector = self._embed(query)
         if vector is not None:
             query_kwargs: dict[str, Any] = {
                 "query_embeddings": [vector],

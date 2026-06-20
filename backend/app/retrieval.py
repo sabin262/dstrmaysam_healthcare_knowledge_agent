@@ -43,10 +43,8 @@ class RetrievalService:
             return []
         client = self._get_opensearch_client()
         embedding_started = time.perf_counter()
-        exact_keyword_only = self.settings.rag_exact_keyword_only and self._is_exact_fact_query(query)
-        vector = None if exact_keyword_only else self._embed_query(query)
+        vector = self._embed_query(query)
         timing["embedding_ms"] = int((time.perf_counter() - embedding_started) * 1000)
-        timing["exact_keyword_only"] = int(exact_keyword_only)
         filtered_keys = list(dict.fromkeys(key for key in (document_keys or []) if key))
         key_filter = {"terms": {"key": filtered_keys}} if filtered_keys else None
         bodies: list[tuple[str, dict[str, Any]]] = []
@@ -77,7 +75,6 @@ class RetrievalService:
                     "text^2",
                     "title^3",
                     "key^3",
-                    "metadata.facts.*^5",
                     "metadata.*",
                 ],
             }
@@ -122,24 +119,6 @@ class RetrievalService:
         timing["total_ms"] = int((time.perf_counter() - started) * 1000)
         self.last_timing_ms = timing
         return merged_hits
-
-    def _is_exact_fact_query(self, query: str) -> bool:
-        lowered = query.lower()
-        exact_markers = {
-            "rent",
-            "deposit",
-            "amount",
-            "address",
-            "date",
-            "start date",
-            "end date",
-            "how much",
-            "what is the",
-            "lease",
-            "policy number",
-            "reference",
-        }
-        return any(marker in lowered for marker in exact_markers)
 
     def _run_search_bodies(
         self,

@@ -42,8 +42,6 @@ class AppSettings:
     rag_neighbor_chunks: int = 1
     ingestion_chunk_size: int = 1500
     ingestion_chunk_overlap: int = 250
-    exact_fact_answers_enabled: bool = True
-    rag_exact_keyword_only: bool = True
     rag_parallel_search_enabled: bool = False
     chat_background_history_save_enabled: bool = False
     local_data_dir: str = "/app/data"
@@ -99,8 +97,6 @@ class AppSettings:
             rag_neighbor_chunks=int(_env("RAG_NEIGHBOR_CHUNKS", "1")),
             ingestion_chunk_size=int(_env("INGESTION_CHUNK_SIZE", "1500")),
             ingestion_chunk_overlap=int(_env("INGESTION_CHUNK_OVERLAP", "250")),
-            exact_fact_answers_enabled=_env_bool("EXACT_FACT_ANSWERS_ENABLED", True),
-            rag_exact_keyword_only=_env_bool("RAG_EXACT_KEYWORD_ONLY", True),
             rag_parallel_search_enabled=_env_bool("RAG_PARALLEL_SEARCH_ENABLED", True),
             chat_background_history_save_enabled=_env_bool("CHAT_BACKGROUND_HISTORY_SAVE_ENABLED", True),
             local_data_dir=_env("LOCAL_DATA_DIR", "/app/data"),
@@ -135,8 +131,6 @@ class AppSettings:
             "rag_neighbor_chunks": self.rag_neighbor_chunks,
             "ingestion_chunk_size": self.ingestion_chunk_size,
             "ingestion_chunk_overlap": self.ingestion_chunk_overlap,
-            "exact_fact_answers_enabled": str(self.exact_fact_answers_enabled),
-            "rag_exact_keyword_only": str(self.rag_exact_keyword_only),
             "rag_parallel_search_enabled": str(self.rag_parallel_search_enabled),
             "chat_background_history_save_enabled": str(self.chat_background_history_save_enabled),
             "local_data_dir": self.local_data_dir,

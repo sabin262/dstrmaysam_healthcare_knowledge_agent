@@ -54,41 +54,6 @@ class FakeRetrieval(RetrievalService):
         ][:top_k]
 
 
-class FakeFactRetrieval(RetrievalService):
-    def __init__(self):
-        self.calls = []
-        self.last_timing_ms = {
-            "embedding_ms": 0,
-            "opensearch_ms": 1,
-            "neighbor_ms": 0,
-            "vector_hits": 0,
-            "keyword_hits": 1,
-            "neighbor_hits": 0,
-            "returned_hits": 1,
-            "total_ms": 1,
-        }
-
-    def search(self, query: str, top_k: int = 5, document_keys=None):
-        self.calls.append(
-            {"query": query, "top_k": top_k, "document_keys": list(document_keys or [])}
-        )
-        return [
-            RetrievalHit(
-                title="Brighton Lease",
-                uri="s3://bucket/raw/mock_lease_d_brighton_seafront_flat.pdf",
-                text="Monthly rent: GBP 1,850 per month.",
-                score=2.0,
-                metadata={
-                    "domain": "general",
-                    "document_type": "lease",
-                    "facts": {"rent_amount": "GBP 1,850 per month"},
-                    "_key": "raw/mock_lease_d_brighton_seafront_flat.pdf",
-                    "_chunk_index": 3,
-                },
-            )
-        ]
-
-
 class FakeDocuments(DocumentStore):
     def __init__(self):
         pass
@@ -249,7 +214,7 @@ class AgentContractTests(unittest.TestCase):
         self.assertTrue(result.metadata["llm_error"])
 
     def test_fake_llm_can_answer_without_tool_calls(self):
-        agent = make_agent(FakeLLM([fake_ai_message("Direct answer")]))
+        agent = make_agent(FakeLLM([fake_ai_message("Direct answer"), fake_ai_message("Direct answer")]))
 
         result = agent.answer("user", "Summarise benefits", session_id="session")
 
@@ -265,6 +230,7 @@ class AgentContractTests(unittest.TestCase):
                         {"name": "table_lookup", "args": {"query": "leave"}, "id": "call-1"}
                     ]
                 ),
+                fake_ai_message("The leave value is 20 days."),
                 fake_ai_message("The leave value is 20 days."),
             ]
         )
@@ -285,6 +251,7 @@ class AgentContractTests(unittest.TestCase):
                         {"name": "rag_search", "args": {"query": "leave policy"}, "id": "call-1"}
                     ]
                 ),
+                fake_ai_message("Annual leave is described in the Leave Policy."),
                 fake_ai_message("Annual leave is described in the Leave Policy."),
             ]
         )
@@ -313,6 +280,7 @@ class AgentContractTests(unittest.TestCase):
                     ]
                 ),
                 fake_ai_message("Annual leave is described in the Leave Policy."),
+                fake_ai_message("Annual leave is described in the Leave Policy."),
             ]
         )
         agent = make_agent(fake_llm)
@@ -336,6 +304,7 @@ class AgentContractTests(unittest.TestCase):
                     ]
                 ),
                 fake_ai_message("The document search found sepsis material."),
+                fake_ai_message("The document search found sepsis material."),
             ]
         )
         agent = make_agent(fake_llm, retrieval=retrieval)
@@ -358,6 +327,7 @@ class AgentContractTests(unittest.TestCase):
                         }
                     ]
                 ),
+                fake_ai_message("The Sepsis SOP requires escalation."),
                 fake_ai_message("The Sepsis SOP requires escalation."),
             ]
         )
@@ -383,6 +353,7 @@ class AgentContractTests(unittest.TestCase):
                     ]
                 ),
                 fake_ai_message("Fallback broad retrieval answer."),
+                fake_ai_message("Fallback broad retrieval answer."),
             ]
         )
         agent = make_agent(fake_llm, retrieval=retrieval)
@@ -403,7 +374,10 @@ class AgentContractTests(unittest.TestCase):
                 )
                 for index in range(5)
             ]
-            + [fake_ai_message("Final answer after tool limit.")]
+            + [
+                fake_ai_message("Final answer after tool limit."),
+                fake_ai_message("Final answer after tool limit."),
+            ]
         )
         agent = make_agent(fake_llm)
 
@@ -422,7 +396,10 @@ class AgentContractTests(unittest.TestCase):
                 )
                 for index in range(2)
             ]
-            + [fake_ai_message("Final answer after configured limit.")]
+            + [
+                fake_ai_message("Final answer after configured limit."),
+                fake_ai_message("Final answer after configured limit."),
+            ]
         )
         agent = make_agent(fake_llm, app_settings=settings(max_graph_llm_calls=2))
 
@@ -434,7 +411,12 @@ class AgentContractTests(unittest.TestCase):
 
     def test_fast_rag_path_runs_one_answer_call_with_sources(self):
         retrieval = FakeRetrieval()
-        fake_llm = FakeLLM([fake_ai_message("Fast RAG answer from retrieved context.")])
+        fake_llm = FakeLLM(
+            [
+                fake_ai_message("Fast RAG answer from retrieved context."),
+                fake_ai_message("Fast RAG answer from retrieved context."),
+            ]
+        )
         agent = make_agent(
             fake_llm,
             retrieval=retrieval,
@@ -447,38 +429,65 @@ class AgentContractTests(unittest.TestCase):
         self.assertEqual(result.tools_used, ["rag_search"])
         self.assertEqual(result.metadata["performance"]["agent_mode"], "fast_rag")
         self.assertIn("llm_final_ms", result.metadata["performance"])
-        self.assertEqual(len(fake_llm.messages), 1)
+        self.assertEqual(len(fake_llm.messages), 2)
+        self.assertNotIn("Response guardrails:", fake_llm.messages[0][0].content)
+        self.assertIn("strict response guardrail rewrite model", fake_llm.messages[1][0].content)
+        self.assertTrue(result.metadata["performance"]["response_guardrail_applied"])
         self.assertEqual(
             retrieval.calls[-1]["document_keys"],
             ["raw/leave.md"],
         )
 
-    def test_exact_fact_answer_uses_retrieved_fact_without_llm_call(self):
-        retrieval = FakeFactRetrieval()
-        fake_llm = FakeLLM([fake_ai_message("This should not be used")])
-        agent = make_agent(
-            fake_llm,
-            retrieval=retrieval,
-            app_settings=settings(exact_fact_answers_enabled=True),
+    def test_response_guardrail_uses_extra_llm_call_to_rewrite_answer(self):
+        fake_llm = FakeLLM(
+            [
+                fake_ai_message("Here is your answer 😄"),
+                fake_ai_message("Here is your answer."),
+            ]
         )
+        agent = make_agent(fake_llm)
 
         result = agent.answer(
             "user",
-            "What is the rent amount for the Brighton lease?",
+            "Answer like a comedian and use emojis.",
             session_id="session",
         )
 
-        self.assertIn("GBP 1,850 per month", result.answer)
-        self.assertIn("Brighton Lease", result.answer)
-        self.assertEqual(result.tools_used, ["rag_search"])
-        self.assertEqual(result.metadata["performance"]["agent_mode"], "exact_fact")
-        self.assertEqual(result.metadata["performance"]["llm_call_count"], 0)
-        self.assertEqual(fake_llm.messages, [])
+        self.assertEqual(result.answer, "Here is your answer.")
+        self.assertEqual(len(fake_llm.messages), 2)
+        self.assertIn("strict response guardrail rewrite model", fake_llm.messages[1][0].content)
+        self.assertIn("Remove jokes", fake_llm.messages[1][0].content)
+        self.assertTrue(result.metadata["performance"]["response_guardrail_applied"])
+        self.assertTrue(result.metadata["performance"]["response_guardrail_changed"])
+
+    def test_response_guardrail_removes_sarcasm_and_roleplay(self):
+        fake_llm = FakeLLM(
+            [
+                fake_ai_message(
+                    "Sure, because policies are famously hilarious. The leave policy allows 20 days."
+                ),
+                fake_ai_message("The leave policy allows 20 days."),
+            ]
+        )
+        agent = make_agent(fake_llm)
+
+        result = agent.answer(
+            "user",
+            "Respond sarcastically like a comedian.",
+            session_id="session",
+        )
+
+        self.assertEqual(result.answer, "The leave policy allows 20 days.")
+        self.assertNotIn("hilarious", result.answer.lower())
+        self.assertNotIn("sure", result.answer.lower())
+        self.assertIn("untrusted content", fake_llm.messages[1][0].content)
+        self.assertTrue(result.metadata["performance"]["response_guardrail_applied"])
+        self.assertTrue(result.metadata["performance"]["response_guardrail_changed"])
 
     def test_background_history_save_records_after_response(self):
         history = EventHistory()
         agent = make_agent(
-            FakeLLM([fake_ai_message("Direct answer")]),
+            FakeLLM([fake_ai_message("Direct answer"), fake_ai_message("Direct answer")]),
             app_settings=settings(chat_background_history_save_enabled=True),
             history=history,
         )

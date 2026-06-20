@@ -4,6 +4,7 @@ from unittest import mock
 from backend.app.auth import AuthService, AuthenticationError, UserManagementError, hash_password
 from backend.app.config import AppSettings
 from backend.app.secrets import StaticSecretProvider
+from backend.app.storage import DocumentRecord
 
 try:
     from fastapi.testclient import TestClient
@@ -188,9 +189,32 @@ class UserManagementApiTests(unittest.TestCase):
 class FakeDocumentStore:
     def __init__(self):
         self.uploads = []
+        self.records = [
+            DocumentRecord(
+                title="policy.md",
+                uri="s3://bucket/raw/policy.md",
+                key="raw/policy.md",
+                content_type="text/markdown",
+                metadata={"domain": "admin_policy", "document_type": "policy"},
+                chunk_count=4,
+                ingestion_status="indexed",
+            )
+        ]
 
     def upload_document(self, key: str, data: bytes, content_type: str) -> None:
         self.uploads.append({"key": key, "data": data, "content_type": content_type})
+
+    def list_documents(self):
+        return list(self.records)
+
+
+class FakeAccess:
+    def filter_documents(self, user, documents):
+        return documents
+
+
+class FakeAgent:
+    access = FakeAccess()
 
 
 class FakeIngestionJob:
@@ -219,6 +243,7 @@ class AdminDocumentApiTests(unittest.TestCase):
             mock.patch.object(main, "get_auth_service", lambda: self.auth),
             mock.patch.object(main, "get_settings", lambda: self.settings),
             mock.patch.object(main, "get_document_store", lambda: self.documents),
+            mock.patch.object(main, "get_agent", lambda: FakeAgent()),
             mock.patch.object(main, "get_secret_provider", lambda: self.auth.secret_provider),
             mock.patch.object(main, "IngestionJob", FakeIngestionJob),
         ]
@@ -275,6 +300,20 @@ class AdminDocumentApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["indexed_chunks"], 3)
         self.assertEqual(FakeIngestionJob.calls, 1)
+
+    def test_documents_endpoint_returns_chunk_table_fields(self):
+        response = self.client.get(
+            "/documents",
+            headers=self.headers_for("admin", "adminpass1"),
+        )
+
+        self.assertEqual(response.status_code, 200)
+        document = response.json()[0]
+        self.assertEqual(document["title"], "policy.md")
+        self.assertEqual(document["key"], "raw/policy.md")
+        self.assertEqual(document["chunk_count"], 4)
+        self.assertEqual(document["ingestion_status"], "indexed")
+        self.assertEqual(document["metadata"]["domain"], "admin_policy")
 
 
 if __name__ == "__main__":

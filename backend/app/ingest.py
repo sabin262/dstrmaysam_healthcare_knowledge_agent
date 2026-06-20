@@ -4,7 +4,6 @@ import argparse
 import hashlib
 import io
 import json
-import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -72,54 +71,6 @@ def infer_healthcare_metadata(key: str, checksum: str) -> dict[str, Any]:
     }
 
 
-def extract_document_facts(key: str, text: str) -> dict[str, str]:
-    normalized_key = key.lower()
-    normalized_text = re.sub(r"\s+", " ", text).strip()
-    if not normalized_text:
-        return {}
-
-    facts: dict[str, str] = {}
-    is_lease_like = any(
-        marker in normalized_key or marker in normalized_text.lower()
-        for marker in ["lease", "tenancy", "rent", "landlord", "tenant", "deposit"]
-    )
-    if not is_lease_like:
-        return facts
-
-    money = r"(?:£|GBP\s*)\s?\d[\d,]*(?:\.\d{2})?"
-    rent_patterns = [
-        rf"\brent(?:al)?(?:\s+amount|\s+payable|\s+is|\s*:)?\s*(?P<value>{money}(?:\s*(?:per|/)\s*(?:month|calendar month|pcm|week|annum|year))?)",
-        rf"\bmonthly\s+rent(?:\s+is|\s*:)?\s*(?P<value>{money}(?:\s*(?:per|/)\s*(?:month|calendar month|pcm))?)",
-        rf"(?P<value>{money}\s*(?:per|/)\s*(?:month|calendar month|pcm))",
-    ]
-    deposit_patterns = [
-        rf"\bdeposit(?:\s+amount|\s+is|\s*:)?\s*(?P<value>{money})",
-        rf"\bsecurity\s+deposit(?:\s+is|\s*:)?\s*(?P<value>{money})",
-    ]
-
-    for pattern in rent_patterns:
-        match = re.search(pattern, normalized_text, flags=re.IGNORECASE)
-        if match:
-            facts["rent_amount"] = match.group("value").strip()
-            break
-
-    for pattern in deposit_patterns:
-        match = re.search(pattern, normalized_text, flags=re.IGNORECASE)
-        if match:
-            facts["deposit_amount"] = match.group("value").strip()
-            break
-
-    address_match = re.search(
-        r"\b(?:property|premises|address)(?:\s+address|\s+is|\s*:)?\s*(?P<value>[^.;\n]{8,160})",
-        text,
-        flags=re.IGNORECASE,
-    )
-    if address_match:
-        facts["property_address"] = re.sub(r"\s+", " ", address_match.group("value")).strip()
-
-    return facts
-
-
 def parse_document(key: str, data: bytes) -> ParsedDocument:
     lower = key.lower()
     title = key.rsplit("/", 1)[-1]
@@ -158,10 +109,6 @@ def parse_document(key: str, data: bytes) -> ParsedDocument:
     else:
         text = data.decode("utf-8", errors="replace")
         content_type = "text/plain"
-
-    facts = extract_document_facts(key, text)
-    if facts:
-        metadata["facts"] = facts
 
     return ParsedDocument(
         key=key,
