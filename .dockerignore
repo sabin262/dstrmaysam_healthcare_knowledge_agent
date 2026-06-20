@@ -6,6 +6,6 @@ __pycache__
 .env
 .env.*
 local_data
+data/chroma
 ragas_report.json
 stress_report.json
-

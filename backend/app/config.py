@@ -46,6 +46,10 @@ class AppSettings:
     rag_exact_keyword_only: bool = True
     rag_parallel_search_enabled: bool = False
     chat_background_history_save_enabled: bool = False
+    local_data_dir: str = "/app/data"
+    chroma_persist_dir: str = "/app/data/chroma"
+    chroma_collection: str = "dstrmaysam-healthcare-knowledge-agent"
+    local_app_secret_file: str = "/app/data/local_app_secret.json"
     local_test_admin_enabled: bool = False
     local_test_admin_username: str = "admin"
     local_test_admin_password: str = "admin123"
@@ -99,6 +103,10 @@ class AppSettings:
             rag_exact_keyword_only=_env_bool("RAG_EXACT_KEYWORD_ONLY", True),
             rag_parallel_search_enabled=_env_bool("RAG_PARALLEL_SEARCH_ENABLED", True),
             chat_background_history_save_enabled=_env_bool("CHAT_BACKGROUND_HISTORY_SAVE_ENABLED", True),
+            local_data_dir=_env("LOCAL_DATA_DIR", "/app/data"),
+            chroma_persist_dir=_env("CHROMA_PERSIST_DIR", "/app/data/chroma"),
+            chroma_collection=_env("CHROMA_COLLECTION", "dstrmaysam-healthcare-knowledge-agent"),
+            local_app_secret_file=_env("LOCAL_APP_SECRET_FILE", "/app/data/local_app_secret.json"),
             local_test_admin_enabled=_env_bool("LOCAL_TEST_ADMIN_ENABLED", False),
             local_test_admin_username=_env("LOCAL_TEST_ADMIN_USERNAME", "admin"),
             local_test_admin_password=_env("LOCAL_TEST_ADMIN_PASSWORD", "admin123"),
@@ -131,5 +139,12 @@ class AppSettings:
             "rag_exact_keyword_only": str(self.rag_exact_keyword_only),
             "rag_parallel_search_enabled": str(self.rag_parallel_search_enabled),
             "chat_background_history_save_enabled": str(self.chat_background_history_save_enabled),
+            "local_data_dir": self.local_data_dir,
+            "chroma_persist_dir": self.chroma_persist_dir,
+            "chroma_collection": self.chroma_collection,
+            "local_app_secret_file": self.local_app_secret_file,
             "local_test_admin_enabled": str(self.local_test_admin_enabled),
         }
+
+    def use_local_resources(self) -> bool:
+        return self.local_test_admin_enabled
