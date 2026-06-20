@@ -8,6 +8,7 @@ This repository implements a containerized internal knowledge assistant MVP with
 - Persistent chat history
 - LangGraph agent orchestration with LangChain Azure OpenAI integrations
 - RAG over S3 documents and OpenSearch Serverless
+- Postgres-backed deterministic lookup for patient, doctor, department, contact, appointment, ward, and formulary data
 - Azure OpenAI through `langchain-openai`
 - Langfuse tracing and prompt management
 - RAGAS golden-data evaluation with optional Langfuse score publishing
@@ -79,6 +80,11 @@ docker compose up --build
 
 Open the chat UI at `http://localhost:8501`.
 
+Docker Compose also starts a local Postgres database. The schema and mock data
+are loaded from `database/init/` on first container startup. If you need to
+re-run the init scripts from scratch, remove the `postgres_data` Docker volume
+and start Compose again.
+
 For local testing only, Docker Compose enables a fallback admin account when
 `APP_ENV=local`:
 
@@ -97,6 +103,35 @@ docker compose run --rm backend python -m app.ingest
 ```
 
 Supported source formats: PDF, DOCX, markdown, text, and CSV.
+
+## Deterministic Lookup Data
+
+The backend registers `postgres_deterministic_lookup` for exact structured
+answers. It should be used for questions about:
+
+- patient details by name, MRN, or NHS number
+- doctor or consultant contact details
+- department and escalation contacts
+- organization directory entries
+- appointments and clinic slots
+- ward locations, beds, and phone numbers
+- formulary and restricted medicine facts
+
+Local mock data lives in Postgres tables created by:
+
+- `database/init/01_schema.sql`
+- `database/init/02_seed.sql`
+
+A CSV copy of the organization directory is also available at
+`data/organization_directory.csv`.
+
+Example deterministic lookup questions:
+
+- "What is the phone number for ICU outreach?"
+- "Which doctor is on call for Cardiology?"
+- "Show patient details for MRN10003."
+- "Where is ward W05?"
+- "Is vancomycin restricted?"
 
 ## Evals
 

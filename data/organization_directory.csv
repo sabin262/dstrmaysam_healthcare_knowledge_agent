@@ -1,0 +1,11 @@
+department_id,department_name,specialty_group,location,main_phone,email,service_lead,escalation_contact,access_level
+DEP-ED,Emergency Department,Urgent and Emergency Care,"Level 1, East Wing",020-5555-1001,ed@example.nhs,Dr Marcus Reed,Duty Manager 020-5555-1505,all_staff
+DEP-CARD,Cardiology,Medicine,"Level 3, North Wing",020-5555-1002,cardiology@example.nhs,Dr Aisha Malik,Cardiology Registrar Bleep 2301,clinical
+DEP-RESP,Respiratory,Medicine,"Level 4, North Wing",020-5555-1003,respiratory@example.nhs,Dr Laura Evans,Respiratory Registrar Bleep 2302,clinical
+DEP-ICU,Intensive Care Unit,Critical Care,"Level 2, West Wing",020-5555-1004,icu@example.nhs,Dr Helen Carter,ICU Outreach 020-5555-1101,clinical
+DEP-PHAR,Pharmacy,Medicines Management,"Level 0, South Wing",020-5555-1005,pharmacy@example.nhs,Priya Shah,Pharmacy Lead 020-5555-1202,all_staff
+DEP-MAT,Maternity,Women and Children,"Level 5, Maternity Block",020-5555-1006,maternity@example.nhs,Grace Morgan,Obstetric Emergency Bleep 2401,clinical
+DEP-PAED,Paediatrics,Women and Children,"Level 5, Children Block",020-5555-1007,paediatrics@example.nhs,Dr Omar Hussain,Paediatric Registrar Bleep 2402,clinical
+DEP-ONC,Oncology,Cancer Services,"Level 6, North Wing",020-5555-1008,oncology@example.nhs,Dr Emily Turner,Oncology Hotline 020-5555-1808,clinical
+DEP-RAD,Radiology,Diagnostics,"Level 0, Imaging Suite",020-5555-1009,radiology@example.nhs,Dr James Wilson,Urgent Radiology Bleep 2601,clinical
+DEP-HR,Human Resources,Corporate Services,"Admin Block, Floor 2",020-5555-1010,hr@example.nhs,Sofia Grant,HR Advice 020-5555-1404,hr_manager

@@ -45,10 +45,20 @@ services:
       LOCAL_TEST_ADMIN_ENABLED: ${LOCAL_TEST_ADMIN_ENABLED:-true}
       LOCAL_TEST_ADMIN_USERNAME: ${LOCAL_TEST_ADMIN_USERNAME:-admin}
       LOCAL_TEST_ADMIN_PASSWORD: ${LOCAL_TEST_ADMIN_PASSWORD:-admin123}
+      POSTGRES_HOST: ${POSTGRES_HOST:-postgres}
+      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+      POSTGRES_DB: ${POSTGRES_DB:-healthcare_agent}
+      POSTGRES_USER: ${POSTGRES_USER:-healthcare_agent}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-healthcare_agent_dev}
+      POSTGRES_SSLMODE: ${POSTGRES_SSLMODE:-disable}
+      DETERMINISTIC_LOOKUP_ENABLED: ${DETERMINISTIC_LOOKUP_ENABLED:-true}
     volumes:
       - ./data:/app/data
     ports:
       - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
 
   frontend:
     build:
@@ -59,3 +69,23 @@ services:
       - "8501:8501"
     depends_on:
       - backend
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-healthcare_agent}
+      POSTGRES_USER: ${POSTGRES_USER:-healthcare_agent}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-healthcare_agent_dev}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/init:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-healthcare_agent} -d ${POSTGRES_DB:-healthcare_agent}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+volumes:
+  postgres_data:

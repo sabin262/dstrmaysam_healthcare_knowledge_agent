@@ -257,6 +257,7 @@ class LocalChromaRetrievalService(LocalChromaEmbeddingMixin, LocalChromaCollecti
     def __init__(self, settings: AppSettings, secret_provider: SecretProvider):
         self.settings = settings
         self.secret_provider = secret_provider
+        self.local_data_dir = Path(settings.local_data_dir)
         self._embeddings: Any | None = None
         self._collection: Any | None = None
         self.last_timing_ms: dict[str, int] = {}
@@ -287,6 +288,9 @@ class LocalChromaRetrievalService(LocalChromaEmbeddingMixin, LocalChromaCollecti
         else:
             hits = self._keyword_hits(collection, query, filtered_keys, result_limit)
 
+        if not hits:
+            hits = self._raw_file_keyword_hits(query, filtered_keys, result_limit)
+
         neighbor_hits = self._fetch_neighbor_hits(collection, hits)
         if neighbor_hits:
             for hit in neighbor_hits:
@@ -303,6 +307,86 @@ class LocalChromaRetrievalService(LocalChromaEmbeddingMixin, LocalChromaCollecti
             "total_ms": int((time.perf_counter() - started) * 1000),
         }
         return hits
+
+    def _raw_file_keyword_hits(
+        self,
+        query: str,
+        document_keys: list[str],
+        limit: int,
+    ) -> list[RetrievalHit]:
+        manifest = self._load_manifest()
+        wanted_keys = set(document_keys)
+        terms = [
+            term.lower().strip(".,?!:;()[]{}")
+            for term in query.split()
+            if len(term.strip(".,?!:;()[]{}")) >= 3
+        ]
+        hits: list[RetrievalHit] = []
+        for record in manifest.get("documents", []):
+            if not isinstance(record, dict):
+                continue
+            key = str(record.get("key") or "")
+            if not key or (wanted_keys and key not in wanted_keys):
+                continue
+            path = self._path_for_key(key)
+            if not path.exists() or not path.is_file():
+                continue
+            try:
+                document = parse_document(key, path.read_bytes())
+            except Exception:
+                continue
+            chunks = chunk_text(
+                document.text,
+                chunk_size=self.settings.ingestion_chunk_size,
+                chunk_overlap=self.settings.ingestion_chunk_overlap,
+            )
+            metadata = dict(record.get("metadata") or document.metadata)
+            base_haystack = " ".join(
+                [
+                    str(record.get("title") or document.title),
+                    key,
+                    json.dumps(metadata, sort_keys=True),
+                ]
+            ).lower()
+            for chunk_index, chunk in enumerate(chunks):
+                haystack = f"{base_haystack}\n{chunk}".lower()
+                score = sum(1 for term in terms if term and term in haystack)
+                if not terms or score:
+                    chunk_metadata = {
+                        **metadata,
+                        "_key": key,
+                        "_chunk_index": chunk_index,
+                        "_content_type": document.content_type,
+                        "_checksum": document.checksum,
+                        "_retrieval_strategy": "raw_keyword",
+                    }
+                    hits.append(
+                        RetrievalHit(
+                            title=str(record.get("title") or document.title),
+                            uri=_local_uri(key),
+                            text=chunk,
+                            score=float(score),
+                            metadata=chunk_metadata,
+                        )
+                    )
+        hits.sort(key=lambda hit: hit.score or 0, reverse=True)
+        return hits[:limit]
+
+    def _load_manifest(self) -> dict[str, Any]:
+        path = self._path_for_key(self.settings.s3_manifest_key)
+        try:
+            manifest = json.loads(path.read_text(encoding="utf-8"))
+            return manifest if isinstance(manifest, dict) else {"documents": []}
+        except Exception:
+            return {"documents": []}
+
+    def _path_for_key(self, key: str) -> Path:
+        safe_key = key.replace("\\", "/").lstrip("/")
+        path = (self.local_data_dir / safe_key).resolve()
+        root = self.local_data_dir.resolve()
+        if root != path and root not in path.parents:
+            raise ValueError("Local path escapes LOCAL_DATA_DIR")
+        return path
 
     def _hits_from_query_results(self, results: dict[str, Any]) -> list[RetrievalHit]:
         documents = (results.get("documents") or [[]])[0]

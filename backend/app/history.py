@@ -37,6 +37,16 @@ class ChatSession:
     updated_at: str
 
 
+@dataclass
+class ChatInteraction:
+    user_id: str
+    session_id: str
+    question: str
+    answer: str
+    created_at: str
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
 class ChatHistoryRepository(Protocol):
     def save_message(self, user_id: str, session_id: str, message: ChatMessage) -> None:
         ...
@@ -45,6 +55,9 @@ class ChatHistoryRepository(Protocol):
         ...
 
     def list_sessions(self, user_id: str, limit: int = 25) -> list[ChatSession]:
+        ...
+
+    def list_recent_interactions(self, limit: int = 100) -> list[ChatInteraction]:
         ...
 
 
@@ -69,6 +82,27 @@ class InMemoryChatHistoryRepository:
         sessions = list(self._sessions.get(user_id, {}).values())
         sessions.sort(key=lambda item: item.updated_at, reverse=True)
         return sessions[:limit]
+
+    def list_recent_interactions(self, limit: int = 100) -> list[ChatInteraction]:
+        interactions: list[ChatInteraction] = []
+        for (user_id, session_id), messages in self._messages.items():
+            last_question = ""
+            for message in messages:
+                if message.role == "user":
+                    last_question = message.content
+                elif message.role == "assistant":
+                    interactions.append(
+                        ChatInteraction(
+                            user_id=user_id,
+                            session_id=session_id,
+                            question=last_question,
+                            answer=message.content,
+                            created_at=message.created_at,
+                            metadata=dict(message.metadata),
+                        )
+                    )
+        interactions.sort(key=lambda item: item.created_at, reverse=True)
+        return interactions[:limit]
 
     def _derive_title(self, user_id: str, session_id: str) -> str:
         for message in self._messages.get((user_id, session_id), []):
@@ -153,6 +187,56 @@ class DynamoDBChatHistoryRepository:
         ]
         sessions.sort(key=lambda item: item.updated_at, reverse=True)
         return sessions[:limit]
+
+    def list_recent_interactions(self, limit: int = 100) -> list[ChatInteraction]:
+        items: list[dict[str, Any]] = []
+        scan_kwargs: dict[str, Any] = {"Limit": max(limit * 4, 100)}
+        while True:
+            response = self._table.scan(**scan_kwargs)
+            items.extend(
+                item
+                for item in response.get("Items", [])
+                if str(item.get("sort_key", "")).startswith("MESSAGE#")
+            )
+            if len(items) >= limit * 4 or "LastEvaluatedKey" not in response:
+                break
+            scan_kwargs["ExclusiveStartKey"] = response["LastEvaluatedKey"]
+
+        grouped: dict[tuple[str, str], list[ChatMessage]] = {}
+        for item in items:
+            user_id = str(item.get("user_id", ""))
+            session_id = str(item.get("session_id", ""))
+            if not user_id or not session_id:
+                continue
+            grouped.setdefault((user_id, session_id), []).append(
+                ChatMessage(
+                    role=str(item.get("role", "user")),
+                    content=str(item.get("content", "")),
+                    created_at=str(item.get("created_at", "")),
+                    metadata=dict(item.get("metadata", {})),
+                )
+            )
+
+        interactions: list[ChatInteraction] = []
+        for (user_id, session_id), messages in grouped.items():
+            messages.sort(key=lambda message: message.created_at)
+            last_question = ""
+            for message in messages:
+                if message.role == "user":
+                    last_question = message.content
+                elif message.role == "assistant":
+                    interactions.append(
+                        ChatInteraction(
+                            user_id=user_id,
+                            session_id=session_id,
+                            question=last_question,
+                            answer=message.content,
+                            created_at=message.created_at,
+                            metadata=dict(message.metadata),
+                        )
+                    )
+        interactions.sort(key=lambda item: item.created_at, reverse=True)
+        return interactions[:limit]
 
 
 def create_chat_history_repository(settings: AppSettings) -> ChatHistoryRepository:
