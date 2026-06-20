@@ -66,6 +66,20 @@ def get_json(path: str) -> dict[str, Any] | list[dict[str, Any]]:
     return response.json()
 
 
+def warm_document_manifest_cache() -> None:
+    if st.session_state.get("password_change_required"):
+        return
+    try:
+        documents = get_json("/documents")
+        st.session_state.document_cache = list(documents) if isinstance(documents, list) else []
+        st.session_state.document_cache_loaded = True
+        st.session_state.document_cache_error = None
+    except Exception as exc:
+        st.session_state.document_cache = []
+        st.session_state.document_cache_loaded = False
+        st.session_state.document_cache_error = str(exc)
+
+
 def store_login(data: dict[str, Any]) -> None:
     st.session_state.access_token = data["access_token"]
     st.session_state.username = data.get("username")
@@ -81,6 +95,33 @@ def parse_departments(raw: str) -> list[str]:
         if value and value not in departments:
             departments.append(value)
     return departments
+
+
+def select_navigation(options: list[str]) -> str:
+    current = st.session_state.get("selected_view", options[0])
+    if current not in options:
+        current = options[0]
+    if hasattr(st, "segmented_control"):
+        selected = st.segmented_control(
+            "Navigation",
+            options,
+            default=current,
+            key="selected-view-segment",
+        )
+        st.session_state.selected_view = selected or current
+        return st.session_state.selected_view
+
+    st.caption("Navigation")
+    for option in options:
+        if st.button(
+            option,
+            key=f"nav-{option}",
+            use_container_width=True,
+            type="primary" if option == current else "secondary",
+        ):
+            st.session_state.selected_view = option
+            st.rerun()
+    return current
 
 
 def render_password_change() -> None:
@@ -103,6 +144,7 @@ def render_password_change() -> None:
                 {"current_password": current_password, "new_password": new_password},
             )
             store_login(data)
+            warm_document_manifest_cache()
             st.success("Password updated")
             st.rerun()
         except Exception as exc:
@@ -199,6 +241,109 @@ def render_admin_users() -> None:
                     st.error(f"Password reset failed: {exc}")
 
 
+def count_rows(counts: dict[str, Any], label: str) -> list[dict[str, Any]]:
+    return [
+        {label: str(name), "Count": int(value)}
+        for name, value in sorted(counts.items(), key=lambda item: int(item[1]), reverse=True)
+    ]
+
+
+def render_admin_dashboard() -> None:
+    st.header("Dashboard")
+    try:
+        payload = get_json("/admin/dashboard?limit=200")
+    except Exception as exc:
+        st.error(f"Unable to load dashboard: {exc}")
+        return
+
+    if not isinstance(payload, dict):
+        st.error("Unexpected dashboard response")
+        return
+
+    summary = payload.get("summary") or {}
+    queries = payload.get("queries") or []
+    metric_columns = st.columns(6)
+    metric_columns[0].metric("Queries", summary.get("total_queries", 0))
+    metric_columns[1].metric("Users", summary.get("unique_users", 0))
+    metric_columns[2].metric("Avg latency", f"{summary.get('avg_latency_ms', 0)} ms")
+    metric_columns[3].metric("Max latency", f"{summary.get('max_latency_ms', 0)} ms")
+    metric_columns[4].metric("Avg sources", f"{float(summary.get('avg_sources_per_query', 0)):.1f}")
+    metric_columns[5].metric("Guardrails", summary.get("guardrail_trigger_count", 0))
+
+    st.divider()
+    chart_columns = st.columns(3)
+    tool_rows = count_rows(summary.get("tool_counts") or {}, "Tool")
+    user_rows = count_rows(summary.get("user_counts") or {}, "User")
+    model_rows = count_rows(summary.get("model_counts") or {}, "Model")
+    with chart_columns[0]:
+        st.subheader("Tools")
+        if tool_rows:
+            st.bar_chart(tool_rows, x="Tool", y="Count")
+        else:
+            st.caption("No tool calls yet")
+    with chart_columns[1]:
+        st.subheader("Users")
+        if user_rows:
+            st.bar_chart(user_rows, x="User", y="Count")
+        else:
+            st.caption("No user activity yet")
+    with chart_columns[2]:
+        st.subheader("Models")
+        if model_rows:
+            st.bar_chart(model_rows, x="Model", y="Count")
+        else:
+            st.caption("No model activity yet")
+
+    st.divider()
+    st.subheader("Per-query details")
+    query_rows = []
+    for item in queries:
+        tools = item.get("tools_used") or []
+        query_rows.append(
+            {
+                "Time": item.get("created_at", ""),
+                "User": item.get("user_id", ""),
+                "Query": item.get("query", ""),
+                "Model": item.get("model", ""),
+                "Tools": ", ".join(tools),
+                "Sources": item.get("source_count", 0),
+                "Latency ms": item.get("latency_ms", 0),
+                "Trace": item.get("trace_id", ""),
+                "Guardrail": item.get("guardrail_applied", False),
+            }
+        )
+    if query_rows:
+        st.dataframe(query_rows, hide_index=True, use_container_width=True)
+    else:
+        st.info("No chat queries found yet.")
+
+    for index, item in enumerate(queries[:25]):
+        label = f"{item.get('user_id', 'user')} - {str(item.get('query', ''))[:80]}"
+        with st.expander(label):
+            detail_columns = st.columns(4)
+            detail_columns[0].metric("Latency", f"{item.get('latency_ms', 0)} ms")
+            detail_columns[1].metric("Sources", item.get("source_count", 0))
+            detail_columns[2].metric("Input tokens", item.get("input_tokens") or 0)
+            detail_columns[3].metric("Output tokens", item.get("output_tokens") or 0)
+            st.caption(f"Trace ID: {item.get('trace_id') or 'unavailable'}")
+            st.caption(f"Session ID: {item.get('session_id')}")
+            st.markdown("**Question**")
+            st.write(item.get("query", ""))
+            st.markdown("**Answer**")
+            st.write(item.get("answer", ""))
+            st.markdown("**Tools and source keys**")
+            st.json(
+                {
+                    "tools_used": item.get("tools_used", []),
+                    "source_document_keys": item.get("source_document_keys", []),
+                    "agent_mode": item.get("agent_mode"),
+                    "guardrail_applied": item.get("guardrail_applied"),
+                    "guardrail_reason": item.get("guardrail_reason"),
+                    "safety": item.get("safety", {}),
+                }
+            )
+
+
 def document_table_rows(documents: list[dict[str, Any]]) -> list[dict[str, Any]]:
     rows = []
     for document in documents:
@@ -236,11 +381,12 @@ def render_documents_table(documents: list[dict[str, Any]]) -> None:
 
 def render_admin_documents() -> None:
     st.header("Documents")
-    current_documents: list[dict[str, Any]] = []
-    try:
-        current_documents = list(get_json("/documents"))
-    except Exception as exc:
-        st.error(f"Unable to load indexed documents: {exc}")
+    current_documents: list[dict[str, Any]] = list(st.session_state.get("document_cache", []))
+    if not st.session_state.get("document_cache_loaded"):
+        warm_document_manifest_cache()
+        current_documents = list(st.session_state.get("document_cache", []))
+    if st.session_state.get("document_cache_error"):
+        st.error(f"Unable to load indexed documents: {st.session_state.document_cache_error}")
 
     uploaded_files = st.file_uploader(
         "Upload documents to S3",
@@ -266,6 +412,9 @@ def render_admin_documents() -> None:
             st.success(f"Uploaded {uploaded_count} file(s)")
 
     st.divider()
+    if st.button("Refresh indexed documents"):
+        warm_document_manifest_cache()
+        st.rerun()
     render_documents_table(current_documents)
     st.divider()
     st.subheader("Ingest and index")
@@ -280,7 +429,10 @@ def render_admin_documents() -> None:
                 metric_columns[2].metric("Total chunks", result.get("total_chunks", 0))
                 metric_columns[3].metric("Skipped", result.get("skipped_documents", 0))
                 metric_columns[4].metric("Removed", result.get("deleted_documents", 0))
-                render_documents_table(list(result.get("documents", [])))
+                st.session_state.document_cache = list(result.get("documents", []))
+                st.session_state.document_cache_loaded = True
+                st.session_state.document_cache_error = None
+                render_documents_table(st.session_state.document_cache)
                 if result.get("force_reindex"):
                     st.caption(
                         "Re-indexed unchanged files because the OpenSearch index changed "
@@ -327,6 +479,7 @@ if "access_token" not in st.session_state:
         try:
             data = post_json("/auth/login", {"username": username, "password": password})
             store_login(data)
+            warm_document_manifest_cache()
             st.session_state.session_id = None
             st.session_state.messages = []
             st.rerun()
@@ -347,7 +500,7 @@ with st.sidebar:
     st.caption(f"Signed in as {st.session_state.get('username') or 'user'}")
     selected_view = "Chat"
     if "admin" in st.session_state.get("roles", []):
-        selected_view = st.radio("View", ["Chat", "Users", "Documents"], key="selected-view")
+        selected_view = select_navigation(["Chat", "Dashboard", "Users", "Documents"])
     if selected_view == "Chat" and st.button("New chat"):
         st.session_state.session_id = None
         st.session_state.messages = []
@@ -371,6 +524,10 @@ with st.sidebar:
                         st.rerun()
         except Exception:
             st.caption("Chat history unavailable")
+
+if selected_view == "Dashboard":
+    render_admin_dashboard()
+    st.stop()
 
 if selected_view == "Users":
     render_admin_users()

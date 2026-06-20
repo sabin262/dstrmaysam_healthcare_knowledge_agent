@@ -4,7 +4,7 @@ from functools import lru_cache
 from pathlib import PurePath
 import re
 
-from fastapi import Depends, FastAPI, File, HTTPException, UploadFile, status
+from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
@@ -353,6 +353,75 @@ def ingest_admin_documents(
         deleted_documents=int(result.get("deleted_documents", 0)),
         deleted_chunks=int(result.get("deleted_chunks", 0)),
     )
+
+
+@app.get("/admin/dashboard")
+def admin_dashboard(
+    limit: int = Query(default=100, ge=1, le=500),
+    user: HealthcareUserContext = Depends(admin_user_context),
+) -> dict[str, object]:
+    interactions = get_history_repository().list_recent_interactions(limit=limit)
+    rows: list[dict[str, object]] = []
+    tool_counts: dict[str, int] = {}
+    user_counts: dict[str, int] = {}
+    model_counts: dict[str, int] = {}
+    latencies: list[int] = []
+    guardrail_count = 0
+    total_sources = 0
+
+    for interaction in interactions:
+        metadata = interaction.metadata or {}
+        performance = metadata.get("performance") if isinstance(metadata.get("performance"), dict) else {}
+        tools_used = [str(tool) for tool in metadata.get("tools_used", [])]
+        sources = metadata.get("sources", []) if isinstance(metadata.get("sources"), list) else []
+        latency_ms = int(metadata.get("latency_ms") or performance.get("total_ms") or 0)
+        model = str(metadata.get("model") or get_settings().azure_openai_deployment or "unknown")
+        guardrail_applied = bool(metadata.get("guardrail_applied") or performance.get("response_guardrail_applied"))
+
+        user_counts[interaction.user_id] = user_counts.get(interaction.user_id, 0) + 1
+        model_counts[model] = model_counts.get(model, 0) + 1
+        total_sources += len(sources)
+        if latency_ms:
+            latencies.append(latency_ms)
+        if guardrail_applied:
+            guardrail_count += 1
+        for tool in tools_used:
+            tool_counts[tool] = tool_counts.get(tool, 0) + 1
+
+        rows.append(
+            {
+                "user_id": interaction.user_id,
+                "session_id": interaction.session_id,
+                "created_at": interaction.created_at,
+                "query": interaction.question,
+                "answer": interaction.answer,
+                "trace_id": metadata.get("trace_id"),
+                "model": model,
+                "tools_used": tools_used,
+                "source_count": len(sources),
+                "source_document_keys": metadata.get("source_document_keys", []),
+                "latency_ms": latency_ms,
+                "input_tokens": metadata.get("input_tokens"),
+                "output_tokens": metadata.get("output_tokens"),
+                "agent_mode": performance.get("agent_mode"),
+                "guardrail_applied": guardrail_applied,
+                "guardrail_reason": metadata.get("guardrail_reason") or performance.get("response_guardrail_reason"),
+                "safety": metadata.get("safety", {}),
+            }
+        )
+
+    summary = {
+        "total_queries": len(rows),
+        "unique_users": len(user_counts),
+        "avg_latency_ms": int(sum(latencies) / len(latencies)) if latencies else 0,
+        "max_latency_ms": max(latencies) if latencies else 0,
+        "avg_sources_per_query": (total_sources / len(rows)) if rows else 0,
+        "guardrail_trigger_count": guardrail_count,
+        "tool_counts": tool_counts,
+        "user_counts": user_counts,
+        "model_counts": model_counts,
+    }
+    return {"summary": summary, "queries": rows}
 
 
 @app.post("/chat", response_model=ChatResponse)
