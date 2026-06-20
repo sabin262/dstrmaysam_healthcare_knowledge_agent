@@ -25,6 +25,7 @@ from .storage import DocumentStore
 from .tools import (
     AgentTool,
     build_agent_tools,
+    catalog_query_terms,
     document_matches_catalog_query,
     format_retrieval_hits,
 )
@@ -552,7 +553,9 @@ class KnowledgeAgent:
         except Exception:
             return []
 
+        terms = catalog_query_terms(query)
         matches = [record for record in records if document_matches_catalog_query(record, query)]
+        matches.sort(key=lambda record: self._catalog_match_score(record, terms), reverse=True)
         if name == "policy_search":
             policy_matches = [
                 record for record in matches if self._is_policy_catalog_record(record.metadata)
@@ -570,6 +573,17 @@ class KnowledgeAgent:
             if len(candidate_keys) >= CATALOG_RAG_CANDIDATE_LIMIT:
                 break
         return candidate_keys
+
+    def _catalog_match_score(self, record: Any, terms: list[str]) -> int:
+        haystack = " ".join(
+            [
+                str(getattr(record, "title", "")),
+                str(getattr(record, "key", "")),
+                str(getattr(record, "content_type", "")),
+                json.dumps(getattr(record, "metadata", {}) or {}, sort_keys=True),
+            ]
+        ).lower()
+        return sum(1 for term in terms if term in haystack)
 
     def _is_policy_catalog_record(self, metadata: dict[str, Any]) -> bool:
         domain = str(metadata.get("domain", "")).lower()
@@ -699,6 +713,25 @@ class KnowledgeAgent:
         self, *, query: str, user_context: HealthcareUserContext
     ) -> GraphAgentResult:
         started = time.perf_counter()
+        offline_tool = self._offline_tool_for_query(query)
+        if offline_tool:
+            tool_output, sources, catalog_guidance = self._run_graph_tool(
+                offline_tool, query, user_context
+            )
+            tool_context = f"{offline_tool} results:\n" + tool_output
+            performance: dict[str, Any] = {
+                "agent_mode": "offline_deterministic_lookup",
+                "agent_execution_ms": _elapsed_ms(started),
+            }
+            return GraphAgentResult(
+                answer=self._offline_answer(query=query, tool_context=tool_context),
+                sources=sources,
+                tools_used=[offline_tool],
+                tool_context=tool_context,
+                catalog_guidance=catalog_guidance,
+                performance=performance,
+            )
+
         tool_output, sources, catalog_guidance = self._run_graph_tool("rag_search", query, user_context)
         tool_context = "RAG search results:\n" + tool_output
         performance: dict[str, Any] = {"agent_mode": "offline_rag"}
@@ -712,6 +745,33 @@ class KnowledgeAgent:
             catalog_guidance=catalog_guidance,
             performance=performance,
         )
+
+    def _offline_tool_for_query(self, query: str) -> str | None:
+        lowered = query.lower()
+        deterministic_markers = {
+            "doctor",
+            "physician",
+            "consultant",
+            "on call",
+            "on-call",
+            "contact",
+            "phone",
+            "email",
+            "department",
+            "ward",
+            "patient",
+            "mrn",
+            "nhs",
+            "appointment",
+            "clinic",
+            "medicine",
+            "drug",
+            "formulary",
+            "restricted",
+        }
+        if any(marker in lowered for marker in deterministic_markers):
+            return "postgres_deterministic_lookup"
+        return None
 
     def _should_use_fast_rag(self, query: str) -> bool:
         if not self.settings.chat_fast_rag_enabled:
@@ -961,6 +1021,30 @@ class KnowledgeAgent:
         return self._llm
 
     def _offline_answer(self, *, query: str, tool_context: str) -> str:
+        if tool_context.startswith("postgres_deterministic_lookup results:"):
+            payload_text = tool_context.split("postgres_deterministic_lookup results:", 1)[-1].strip()
+            try:
+                payload = json.loads(payload_text)
+            except json.JSONDecodeError:
+                payload = {}
+            rows = payload.get("rows") if isinstance(payload, dict) else None
+            message = str(payload.get("message") or "") if isinstance(payload, dict) else ""
+            if isinstance(rows, list) and rows:
+                lines = [
+                    "Based on the deterministic database lookup, here is the exact matching information:"
+                ]
+                for index, row in enumerate(rows[:5], start=1):
+                    if isinstance(row, dict):
+                        visible = {
+                            key: value
+                            for key, value in row.items()
+                            if value not in (None, "", [])
+                        }
+                        lines.append(f"{index}. " + "; ".join(f"{key}: {value}" for key, value in visible.items()))
+                lines.append("\nSource: Postgres deterministic lookup.")
+                return "\n".join(lines)
+            return message or "No matching deterministic database rows were found."
+
         if "No relevant document chunks found." in tool_context:
             return (
                 "I could not find enough indexed knowledge context to answer this confidently. "

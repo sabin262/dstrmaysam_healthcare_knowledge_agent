@@ -148,7 +148,7 @@ class DeterministicLookupService:
                 if category == "patients":
                     return self._query_patients(cur, terms, scopes, limit)
                 if category == "doctors":
-                    return self._query_doctors(cur, terms, scopes, limit)
+                    return self._query_doctors(cur, query, terms, scopes, limit)
                 if category == "departments":
                     return self._query_departments(cur, terms, scopes, limit)
                 if category == "contacts":
@@ -198,19 +198,21 @@ class DeterministicLookupService:
         )
         return list(cur.fetchall())
 
-    def _query_doctors(self, cur, terms: list[str], scopes: tuple[str, ...], limit: int):
+    def _query_doctors(self, cur, query: str, terms: list[str], scopes: tuple[str, ...], limit: int):
         pattern = _like(_best_search_term(terms))
+        on_call_only = "on call" in query.lower() or "on-call" in query.lower()
         cur.execute(
             f"""
             SELECT doctor_id, full_name, grade, specialty, department_name, phone,
                    email, bleep, on_call_today, access_level
             FROM doctors
             WHERE {self._access_sql()}
+              AND (%s = false OR on_call_today = true)
               AND (%s = '%%' OR lower(full_name) LIKE %s OR lower(specialty) LIKE %s OR lower(department_name) LIKE %s)
             ORDER BY department_name, full_name
             LIMIT %s
             """,
-            (list(scopes), pattern, pattern, pattern, pattern, limit),
+            (list(scopes), on_call_only, "%" if on_call_only else pattern, pattern, pattern, pattern, limit),
         )
         return list(cur.fetchall())
 
