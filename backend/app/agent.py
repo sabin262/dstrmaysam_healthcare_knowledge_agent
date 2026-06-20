@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .config import AppSettings
+from .deterministic_lookup import DeterministicLookupService
 from .healthcare import (
     HealthcareAccessControl,
     HealthcareAuditLogger,
@@ -35,6 +36,7 @@ HEALTHCARE_TOOL_NAMES = [
     "catalogue_search",
     "calendar_rota_lookup",
     "formulary_table_lookup",
+    "postgres_deterministic_lookup",
     "safety_guard",
 ]
 RETRIEVAL_SOURCE_TOOLS = {"rag_search", "document_search", "policy_search"}
@@ -250,6 +252,7 @@ class KnowledgeAgent:
         self.redactor = PHIRedactor()
         self.safety = HealthcareSafetyGuard(self.redactor)
         self.audit = HealthcareAuditLogger()
+        self.deterministic_lookup = DeterministicLookupService(settings)
         self.tools = build_agent_tools(retrieval, documents)
         self._llm: Any | None = None
         self._llm_error: str | None = None
@@ -290,6 +293,7 @@ class KnowledgeAgent:
                 user=user_context,
                 access=self.access,
                 safety=self.safety,
+                deterministic_lookup=self.deterministic_lookup,
             )
             original_tools = self.tools
             try:
@@ -727,6 +731,19 @@ class KnowledgeAgent:
             "table",
             "csv",
             "row",
+            "patient",
+            "mrn",
+            "nhs",
+            "doctor",
+            "physician",
+            "consultant",
+            "department",
+            "contact",
+            "phone",
+            "email",
+            "appointment",
+            "clinic",
+            "ward",
         }
         return not any(marker in lowered for marker in non_rag_markers)
 

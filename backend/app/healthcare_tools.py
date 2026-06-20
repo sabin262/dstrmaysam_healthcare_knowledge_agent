@@ -11,6 +11,7 @@ from .healthcare import (
     HealthcareUserContext,
     SourceGovernance,
 )
+from .deterministic_lookup import DeterministicLookupService
 from .retrieval import RetrievalService
 from .storage import DocumentRecord, DocumentStore
 from .tools import AgentTool, format_retrieval_hits
@@ -54,6 +55,7 @@ def build_healthcare_agent_tools(
     user: HealthcareUserContext,
     access: HealthcareAccessControl,
     safety: HealthcareSafetyGuard,
+    deterministic_lookup: DeterministicLookupService | None = None,
 ) -> list[AgentTool]:
     def document_search(query: str) -> str:
         """Semantic search over approved healthcare documents."""
@@ -126,6 +128,19 @@ def build_healthcare_agent_tools(
         assessment = safety.assess(query)
         return json.dumps(assessment.as_dict(), indent=2)
 
+    def postgres_deterministic_lookup(query: str) -> str:
+        """Exact Postgres lookup for patients, doctors, departments, contacts, appointments, wards, and formulary data."""
+        if deterministic_lookup is None:
+            return json.dumps(
+                {
+                    "category": "unavailable",
+                    "message": "Postgres deterministic lookup is not configured.",
+                    "rows": [],
+                },
+                indent=2,
+            )
+        return deterministic_lookup.lookup(query, user).to_json()
+
     return [
         AgentTool(
             name="document_search",
@@ -151,6 +166,14 @@ def build_healthcare_agent_tools(
             name="formulary_table_lookup",
             description="Lookup restricted medicines, formulary rows, approval rules, codes, and structured facts.",
             run=formulary_table_lookup,
+        ),
+        AgentTool(
+            name="postgres_deterministic_lookup",
+            description=(
+                "Exact Postgres lookup for patient details, contact information, doctor information, "
+                "department directory data, appointments, wards, and formulary facts."
+            ),
+            run=postgres_deterministic_lookup,
         ),
         AgentTool(
             name="safety_guard",

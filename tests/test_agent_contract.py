@@ -102,6 +102,12 @@ def fake_ai_message(content: str = "", tool_calls=None):
         return FakeAIMessage(content, tool_calls)
 
 
+def message_content(message):
+    if isinstance(message, dict):
+        return message.get("content", "")
+    return message.content
+
+
 class FakeLLM:
     def __init__(self, responses):
         self.responses = list(responses)
@@ -193,6 +199,7 @@ class AgentContractTests(unittest.TestCase):
                 "catalogue_search",
                 "calendar_rota_lookup",
                 "formulary_table_lookup",
+                "postgres_deterministic_lookup",
                 "safety_guard",
             ],
         )
@@ -430,8 +437,8 @@ class AgentContractTests(unittest.TestCase):
         self.assertEqual(result.metadata["performance"]["agent_mode"], "fast_rag")
         self.assertIn("llm_final_ms", result.metadata["performance"])
         self.assertEqual(len(fake_llm.messages), 2)
-        self.assertNotIn("Response guardrails:", fake_llm.messages[0][0].content)
-        self.assertIn("strict response guardrail rewrite model", fake_llm.messages[1][0].content)
+        self.assertNotIn("Response guardrails:", message_content(fake_llm.messages[0][0]))
+        self.assertIn("strict response guardrail rewrite model", message_content(fake_llm.messages[1][0]))
         self.assertTrue(result.metadata["performance"]["response_guardrail_applied"])
         self.assertEqual(
             retrieval.calls[-1]["document_keys"],
@@ -455,8 +462,8 @@ class AgentContractTests(unittest.TestCase):
 
         self.assertEqual(result.answer, "Here is your answer.")
         self.assertEqual(len(fake_llm.messages), 2)
-        self.assertIn("strict response guardrail rewrite model", fake_llm.messages[1][0].content)
-        self.assertIn("Remove jokes", fake_llm.messages[1][0].content)
+        self.assertIn("strict response guardrail rewrite model", message_content(fake_llm.messages[1][0]))
+        self.assertIn("Remove jokes", message_content(fake_llm.messages[1][0]))
         self.assertTrue(result.metadata["performance"]["response_guardrail_applied"])
         self.assertTrue(result.metadata["performance"]["response_guardrail_changed"])
 
@@ -480,7 +487,7 @@ class AgentContractTests(unittest.TestCase):
         self.assertEqual(result.answer, "The leave policy allows 20 days.")
         self.assertNotIn("hilarious", result.answer.lower())
         self.assertNotIn("sure", result.answer.lower())
-        self.assertIn("untrusted content", fake_llm.messages[1][0].content)
+        self.assertIn("untrusted content", message_content(fake_llm.messages[1][0]))
         self.assertTrue(result.metadata["performance"]["response_guardrail_applied"])
         self.assertTrue(result.metadata["performance"]["response_guardrail_changed"])
 

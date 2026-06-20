@@ -51,6 +51,13 @@ class AppSettings:
     local_test_admin_enabled: bool = False
     local_test_admin_username: str = "admin"
     local_test_admin_password: str = "admin123"
+    postgres_host: str = "postgres"
+    postgres_port: int = 5432
+    postgres_db: str = "healthcare_agent"
+    postgres_user: str = "healthcare_agent"
+    postgres_password: str = "healthcare_agent_dev"
+    postgres_sslmode: str = "disable"
+    deterministic_lookup_enabled: bool = True
 
     @classmethod
     def from_env(cls) -> "AppSettings":
@@ -106,6 +113,13 @@ class AppSettings:
             local_test_admin_enabled=_env_bool("LOCAL_TEST_ADMIN_ENABLED", False),
             local_test_admin_username=_env("LOCAL_TEST_ADMIN_USERNAME", "admin"),
             local_test_admin_password=_env("LOCAL_TEST_ADMIN_PASSWORD", "admin123"),
+            postgres_host=_env("POSTGRES_HOST", "postgres"),
+            postgres_port=int(_env("POSTGRES_PORT", "5432")),
+            postgres_db=_env("POSTGRES_DB", "healthcare_agent"),
+            postgres_user=_env("POSTGRES_USER", "healthcare_agent"),
+            postgres_password=_env("POSTGRES_PASSWORD", "healthcare_agent_dev"),
+            postgres_sslmode=_env("POSTGRES_SSLMODE", "disable"),
+            deterministic_lookup_enabled=_env_bool("DETERMINISTIC_LOOKUP_ENABLED", True),
         )
 
     def public_summary(self) -> dict[str, str | int]:
@@ -138,6 +152,10 @@ class AppSettings:
             "chroma_collection": self.chroma_collection,
             "local_app_secret_file": self.local_app_secret_file,
             "local_test_admin_enabled": str(self.local_test_admin_enabled),
+            "postgres_host": self.postgres_host,
+            "postgres_port": self.postgres_port,
+            "postgres_db": self.postgres_db,
+            "deterministic_lookup_enabled": str(self.deterministic_lookup_enabled),
         }
 
     def use_local_resources(self) -> bool:
