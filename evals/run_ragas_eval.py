@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import time
 import urllib.error
 import urllib.request
@@ -16,6 +17,7 @@ RAGAS_SCORE_NAMES = {
     "context_precision": "ragas_context_precision",
     "context_recall": "ragas_context_recall",
 }
+RAGAS_OVERALL_SCORE_NAME = "ragas_overall"
 
 
 def post_chat(api_url: str, token: str, question: str) -> dict[str, Any]:
@@ -86,6 +88,53 @@ def metric_value(value: Any) -> float | None:
         return None
 
 
+def load_env_file(path: Path = Path(".env")) -> None:
+    if not path.exists():
+        return
+    for raw_line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if not key or key in os.environ:
+            continue
+        os.environ[key] = value.strip().strip('"').strip("'")
+
+
+def ragas_evaluator_models() -> tuple[Any | None, Any | None]:
+    required = [
+        "AZURE_OPENAI_API_KEY",
+        "AZURE_OPENAI_ENDPOINT",
+        "AZURE_OPENAI_API_VERSION",
+        "AZURE_OPENAI_DEPLOYMENT",
+        "AZURE_OPENAI_EMBEDDING_DEPLOYMENT",
+    ]
+    if not all(os.getenv(name) for name in required):
+        return None, None
+
+    from langchain_openai import AzureChatOpenAI, AzureOpenAIEmbeddings
+    from ragas.embeddings import LangchainEmbeddingsWrapper
+    from ragas.llms import LangchainLLMWrapper
+
+    llm = AzureChatOpenAI(
+        azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
+        api_key=os.environ["AZURE_OPENAI_API_KEY"],
+        api_version=os.environ["AZURE_OPENAI_API_VERSION"],
+        azure_deployment=os.environ["AZURE_OPENAI_DEPLOYMENT"],
+        temperature=0,
+        timeout=60,
+        max_retries=2,
+    )
+    embeddings = AzureOpenAIEmbeddings(
+        azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
+        api_key=os.environ["AZURE_OPENAI_API_KEY"],
+        api_version=os.environ["AZURE_OPENAI_API_VERSION"],
+        azure_deployment=os.environ["AZURE_OPENAI_EMBEDDING_DEPLOYMENT"],
+    )
+    return LangchainLLMWrapper(llm), LangchainEmbeddingsWrapper(embeddings)
+
+
 def maybe_run_ragas(rows: list[dict[str, Any]]) -> dict[str, Any]:
     try:
         from datasets import Dataset
@@ -100,9 +149,12 @@ def maybe_run_ragas(rows: list[dict[str, Any]]) -> dict[str, Any]:
                 "ground_truth": [row["expected_answer"] for row in rows],
             }
         )
+        llm, embeddings = ragas_evaluator_models()
         result = evaluate(
             dataset,
             metrics=[faithfulness, answer_relevancy, context_precision, context_recall],
+            llm=llm,
+            embeddings=embeddings,
         )
         return {
             "ragas_available": True,
@@ -120,9 +172,12 @@ def attach_ragas_scores(report: dict[str, Any]) -> None:
             for metric in RAGAS_SCORE_NAMES
             if metric in ragas_row
         }
+        values = [value for value in row["ragas"].values() if value is not None]
+        if values:
+            row["ragas"][RAGAS_OVERALL_SCORE_NAME] = sum(values) / len(values)
 
     summary = report.setdefault("summary", {})
-    for metric in RAGAS_SCORE_NAMES:
+    for metric in [*RAGAS_SCORE_NAMES, RAGAS_OVERALL_SCORE_NAME]:
         values = [
             row.get("ragas", {}).get(metric)
             for row in report.get("rows", [])
@@ -148,6 +203,23 @@ def load_langfuse_secret_from_aws(secret_name: str, aws_region: str) -> dict[str
     return {key: str(data[key]) for key in required}
 
 
+def load_langfuse_secret_from_env() -> dict[str, str] | None:
+    mapping = {
+        "public_key": os.getenv("LANGFUSE_PUBLIC_KEY"),
+        "secret_key": os.getenv("LANGFUSE_SECRET_KEY"),
+        "base_url": os.getenv("LANGFUSE_BASE_URL"),
+    }
+    if not any(mapping.values()):
+        return None
+    missing = [key for key, value in mapping.items() if not value]
+    if missing:
+        raise RuntimeError(
+            "Langfuse environment variables are incomplete. Set "
+            "LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY, and LANGFUSE_BASE_URL."
+        )
+    return {key: str(value) for key, value in mapping.items() if value}
+
+
 def create_langfuse_client(secret: dict[str, str]) -> Any:
     from langfuse import Langfuse
 
@@ -156,6 +228,27 @@ def create_langfuse_client(secret: dict[str, str]) -> Any:
         secret_key=secret["secret_key"],
         base_url=secret["base_url"],
     )
+
+
+def langfuse_preflight(args: argparse.Namespace) -> dict[str, Any]:
+    status: dict[str, Any] = {
+        "chat_token_present": bool(args.token),
+        "langfuse_env_present": bool(load_langfuse_secret_from_env()),
+        "langfuse_secret_name": args.langfuse_secret_name,
+        "langfuse_client_created": False,
+        "langfuse_preflight_error": None,
+    }
+    try:
+        secret = load_langfuse_secret_from_env()
+        if secret is None:
+            secret = load_langfuse_secret_from_aws(args.langfuse_secret_name, args.aws_region)
+        client = create_langfuse_client(secret)
+        status["langfuse_client_created"] = True
+        if hasattr(client, "flush"):
+            client.flush()
+    except Exception as exc:
+        status["langfuse_preflight_error"] = str(exc)
+    return status
 
 
 def create_eval_trace(client: Any, run_name: str, report: dict[str, Any]) -> str:
@@ -234,7 +327,9 @@ def publish_langfuse_scores(report: dict[str, Any], args: argparse.Namespace, cl
     try:
         langfuse_client = client
         if langfuse_client is None:
-            secret = load_langfuse_secret_from_aws(args.langfuse_secret_name, args.aws_region)
+            secret = load_langfuse_secret_from_env()
+            if secret is None:
+                secret = load_langfuse_secret_from_aws(args.langfuse_secret_name, args.aws_region)
             langfuse_client = create_langfuse_client(secret)
 
         eval_trace_id = create_eval_trace(langfuse_client, args.eval_run_name, report)
@@ -265,6 +360,16 @@ def publish_langfuse_scores(report: dict[str, Any], args: argparse.Namespace, cl
                             value=float(value),
                             metadata={"question": row.get("question")},
                         )
+                overall = row.get("ragas", {}).get(RAGAS_OVERALL_SCORE_NAME)
+                if overall is not None:
+                    create_numeric_score(
+                        langfuse_client,
+                        trace_id=trace_id,
+                        name=RAGAS_OVERALL_SCORE_NAME,
+                        value=float(overall),
+                        comment="Mean of available RAGAS metrics for this question.",
+                        metadata={"question": row.get("question")},
+                    )
                 row["langfuse_publish_status"] = "published"
             except Exception as exc:
                 row["langfuse_publish_status"] = "failed"
@@ -278,6 +383,7 @@ def publish_langfuse_scores(report: dict[str, Any], args: argparse.Namespace, cl
         }
         for metric in RAGAS_SCORE_NAMES:
             summary_scores[f"avg_{metric}"] = summary.get(f"avg_{metric}")
+        summary_scores[f"avg_{RAGAS_OVERALL_SCORE_NAME}"] = summary.get(f"avg_{RAGAS_OVERALL_SCORE_NAME}")
 
         for name, value in summary_scores.items():
             numeric = metric_value(value)
@@ -357,7 +463,7 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run golden-data RAGAS evaluation")
     parser.add_argument("--api-url", default="http://localhost:8000")
-    parser.add_argument("--token", required=True)
+    parser.add_argument("--token", default=os.getenv("CHAT_API_TOKEN"))
     parser.add_argument("--dataset", default=str(Path(__file__).with_name("golden_dataset.csv")))
     parser.add_argument("--output", default="ragas_report.json")
     parser.add_argument("--publish-langfuse", action="store_true")
@@ -365,9 +471,17 @@ def main() -> int:
     parser.add_argument("--secrets-stage", default="dev")
     parser.add_argument("--langfuse-secret-name", default=None)
     parser.add_argument("--eval-run-name", default="dstrmaysam-healthcare-knowledge-agent-ragas-eval")
+    parser.add_argument("--preflight-langfuse", action="store_true")
     args = parser.parse_args()
+    if not args.token:
+        parser.error("--token is required unless CHAT_API_TOKEN is set")
     if not args.langfuse_secret_name:
         args.langfuse_secret_name = default_langfuse_secret_name(args.secrets_stage)
+    load_env_file()
+
+    if args.preflight_langfuse:
+        print(json.dumps(langfuse_preflight(args), indent=2))
+        return 0
 
     report = build_report(args)
     if args.publish_langfuse:
@@ -382,7 +496,20 @@ def main() -> int:
         )
 
     Path(args.output).write_text(json.dumps(report, indent=2), encoding="utf-8")
-    print(json.dumps(report["summary"], indent=2))
+    print(
+        json.dumps(
+            {
+                "summary": report["summary"],
+                "ragas_available": report.get("ragas_available"),
+                "ragas_error": report.get("ragas_error"),
+                "langfuse_published": report.get("langfuse_published"),
+                "langfuse_eval_trace_id": report.get("langfuse_eval_trace_id"),
+                "langfuse_publish_error": report.get("langfuse_publish_error"),
+                "output": args.output,
+            },
+            indent=2,
+        )
+    )
     return 0
 
 

@@ -44,7 +44,7 @@ class AppSettings:
     ingestion_chunk_overlap: int = 250
     rag_parallel_search_enabled: bool = False
     chat_background_history_save_enabled: bool = False
-    chat_response_guardrail_enabled: bool = False
+    chat_response_guardrail_enabled: bool = True
     local_data_dir: str = "/app/data"
     chroma_persist_dir: str = "/app/data/chroma"
     chroma_collection: str = "dstrmaysam-healthcare-knowledge-agent"
@@ -107,7 +107,7 @@ class AppSettings:
             ingestion_chunk_overlap=int(_env("INGESTION_CHUNK_OVERLAP", "250")),
             rag_parallel_search_enabled=_env_bool("RAG_PARALLEL_SEARCH_ENABLED", True),
             chat_background_history_save_enabled=_env_bool("CHAT_BACKGROUND_HISTORY_SAVE_ENABLED", True),
-            chat_response_guardrail_enabled=_env_bool("CHAT_RESPONSE_GUARDRAIL_ENABLED", False),
+            chat_response_guardrail_enabled=_env_bool("CHAT_RESPONSE_GUARDRAIL_ENABLED", True),
             local_data_dir=_env("LOCAL_DATA_DIR", "/app/data"),
             chroma_persist_dir=_env("CHROMA_PERSIST_DIR", "/app/data/chroma"),
             chroma_collection=_env("CHROMA_COLLECTION", "dstrmaysam-healthcare-knowledge-agent"),

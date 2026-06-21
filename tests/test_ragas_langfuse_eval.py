@@ -1,5 +1,6 @@
 import argparse
 import json
+import os
 import sys
 import unittest
 
@@ -7,6 +8,7 @@ import evals.run_ragas_eval as ragas_eval
 from evals.run_ragas_eval import (
     attach_ragas_scores,
     build_report,
+    load_langfuse_secret_from_env,
     load_langfuse_secret_from_aws,
     publish_langfuse_scores,
     source_contexts,
@@ -79,8 +81,10 @@ class EvalLangfuseTests(unittest.TestCase):
         attach_ragas_scores(report)
 
         self.assertEqual(report["rows"][0]["ragas"]["faithfulness"], 0.9)
+        self.assertAlmostEqual(report["rows"][0]["ragas"]["ragas_overall"], 0.75)
         self.assertAlmostEqual(report["summary"]["avg_faithfulness"], 0.7)
         self.assertAlmostEqual(report["summary"]["avg_context_recall"], 0.4)
+        self.assertAlmostEqual(report["summary"]["avg_ragas_overall"], 0.55)
 
     def test_load_langfuse_secret_from_aws_uses_secret_manager_shape(self):
         class FakeSecretsClient:
@@ -115,6 +119,49 @@ class EvalLangfuseTests(unittest.TestCase):
         self.assertEqual(secret["secret_key"], "sk")
         self.assertEqual(secret["base_url"], "https://cloud.langfuse.com")
 
+    def test_load_langfuse_secret_from_env(self):
+        original = {key: os.environ.get(key) for key in [
+            "LANGFUSE_PUBLIC_KEY",
+            "LANGFUSE_SECRET_KEY",
+            "LANGFUSE_BASE_URL",
+        ]}
+        try:
+            os.environ["LANGFUSE_PUBLIC_KEY"] = "pk"
+            os.environ["LANGFUSE_SECRET_KEY"] = "sk"
+            os.environ["LANGFUSE_BASE_URL"] = "https://cloud.langfuse.com"
+
+            secret = load_langfuse_secret_from_env()
+        finally:
+            for key, value in original.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+        self.assertEqual(secret["public_key"], "pk")
+        self.assertEqual(secret["secret_key"], "sk")
+        self.assertEqual(secret["base_url"], "https://cloud.langfuse.com")
+
+    def test_load_langfuse_secret_from_env_rejects_partial_config(self):
+        original = {key: os.environ.get(key) for key in [
+            "LANGFUSE_PUBLIC_KEY",
+            "LANGFUSE_SECRET_KEY",
+            "LANGFUSE_BASE_URL",
+        ]}
+        try:
+            os.environ["LANGFUSE_PUBLIC_KEY"] = "pk"
+            os.environ.pop("LANGFUSE_SECRET_KEY", None)
+            os.environ["LANGFUSE_BASE_URL"] = "https://cloud.langfuse.com"
+
+            with self.assertRaises(RuntimeError):
+                load_langfuse_secret_from_env()
+        finally:
+            for key, value in original.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
     def test_publish_langfuse_scores_writes_row_and_summary_scores(self):
         report = {
             "generated_at": "2026-06-18T00:00:00Z",
@@ -128,6 +175,7 @@ class EvalLangfuseTests(unittest.TestCase):
                         "answer_relevancy": 0.8,
                         "context_precision": 0.7,
                         "context_recall": 0.6,
+                        "ragas_overall": 0.75,
                     },
                 }
             ],
@@ -139,6 +187,7 @@ class EvalLangfuseTests(unittest.TestCase):
                 "avg_answer_relevancy": 0.8,
                 "avg_context_precision": 0.7,
                 "avg_context_recall": 0.6,
+                "avg_ragas_overall": 0.75,
             },
         }
         args = argparse.Namespace(
@@ -156,7 +205,9 @@ class EvalLangfuseTests(unittest.TestCase):
         score_names = {score["name"] for score in client.scores}
         self.assertIn("simple_expected_overlap", score_names)
         self.assertIn("ragas_faithfulness", score_names)
+        self.assertIn("ragas_overall", score_names)
         self.assertIn("avg_faithfulness", score_names)
+        self.assertIn("avg_ragas_overall", score_names)
         self.assertIn("total_questions", score_names)
         self.assertTrue(client.flushed)
 

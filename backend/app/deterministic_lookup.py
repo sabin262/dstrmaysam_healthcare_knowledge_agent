@@ -5,6 +5,7 @@ import re
 import csv
 import io
 from dataclasses import dataclass
+from datetime import date, timedelta
 from typing import Any, Sequence
 
 from .config import AppSettings
@@ -22,6 +23,8 @@ def _like(term: str) -> str:
 
 STOPWORDS = {
     "show",
+    "is",
+    "are",
     "what",
     "which",
     "who",
@@ -43,6 +46,8 @@ STOPWORDS = {
     "patient",
     "doctor",
     "physician",
+    "nurse",
+    "nurses",
     "department",
     "ward",
     "appointment",
@@ -54,9 +59,11 @@ STOPWORDS = {
     "call",
     "oncall",
     "today",
+    "tomorrow",
     "available",
     "duty",
     "rota",
+    "shift",
 }
 
 
@@ -66,6 +73,17 @@ def _best_search_term(terms: list[str]) -> str:
             return term
     useful = [term for term in terms if term.lower() not in STOPWORDS]
     return useful[-1] if useful else (terms[-1] if terms else "")
+
+
+def _requested_dates(query: str) -> set[str]:
+    lowered = query.lower()
+    requested: set[str] = set(re.findall(r"\b\d{4}-\d{2}-\d{2}\b", query))
+    today = date.today()
+    if "today" in lowered:
+        requested.add(today.isoformat())
+    if "tomorrow" in lowered:
+        requested.add((today + timedelta(days=1)).isoformat())
+    return requested
 
 
 def _access_scopes(user: HealthcareUserContext) -> tuple[str, ...]:
@@ -121,7 +139,7 @@ class DeterministicLookupService:
         category = self._classify(query)
         scopes = _access_scopes(user)
         csv_result = self._lookup_catalogued_csv(category, query, user, scopes, limit)
-        if csv_result.rows:
+        if csv_result.rows or category == "staff_rota":
             return csv_result
 
         try:
@@ -148,10 +166,13 @@ class DeterministicLookupService:
         if self.documents is None:
             return LookupResult(category, [], scopes, "No document store configured for deterministic CSV lookup.")
         records = self._catalogue_candidates(category, query, user)
+        requested_dates = _requested_dates(query)
         matches: list[dict[str, Any]] = []
         for record in records[:4]:
             for row in self._csv_rows(record):
                 if not self._row_allowed(row, scopes):
+                    continue
+                if requested_dates and not self._row_matches_requested_date(row, requested_dates):
                     continue
                 score = self._row_score(row, query, category)
                 if score <= 0:
@@ -172,6 +193,13 @@ class DeterministicLookupService:
         rows = matches[:limit]
         message = "No matching deterministic CSV rows found." if not rows else f"Found {len(rows)} deterministic CSV row(s)."
         return LookupResult(f"catalogued_csv_{category}", rows, scopes, message)
+
+    def _row_matches_requested_date(self, row: dict[str, Any], requested_dates: set[str]) -> bool:
+        for key in ("date", "shift_date", "appointment_date"):
+            value = str(row.get(key) or "").strip()
+            if value in requested_dates:
+                return True
+        return False
 
     def _catalogue_candidates(
         self,
@@ -260,6 +288,17 @@ class DeterministicLookupService:
         if category == "doctors" and any(marker in lowered_query for marker in ["on call", "on-call", "oncall", "duty", "rota"]):
             if str(row.get("on_call") or row.get("on_call_today") or "").strip().lower() not in {"yes", "true", "1"}:
                 return 0
+        if category == "staff_rota":
+            role = str(row.get("role") or "").strip().lower()
+            if "senior nurse" in lowered_query and "senior nurse" not in role:
+                return 0
+            if "staff nurse" in lowered_query and "staff nurse" not in role:
+                return 0
+            if any(marker in lowered_query for marker in ["nurse", "nurses", "nursing"]) and "nurse" not in role:
+                return 0
+            if any(marker in lowered_query for marker in ["on call", "on-call", "oncall", "duty"]):
+                if str(row.get("on_call") or row.get("on_call_today") or "").strip().lower() not in {"yes", "true", "1"}:
+                    return 0
         terms = [term for term in _terms(query) if term not in STOPWORDS]
         if not terms:
             return 1
@@ -272,6 +311,7 @@ class DeterministicLookupService:
                 "contacts": (("department", 30), ("contact_name", 6), ("role", 4), ("escalation_type", 3)),
                 "departments": (("department", 30), ("department_name", 30), ("service_lead", 4)),
                 "doctors": (("staff_name", 20), ("full_name", 20), ("department", 12), ("role", 6)),
+                "staff_rota": (("staff_name", 20), ("full_name", 20), ("role", 18), ("department", 12)),
                 "wards": (("ward_name", 20), ("ward_code", 20), ("specialty", 16)),
                 "appointments": (("clinic_name", 20), ("department", 12), ("patient_name", 10)),
                 "formulary": (("medicine", 20), ("medicine_name", 20), ("category", 8)),
@@ -300,6 +340,7 @@ class DeterministicLookupService:
         hints = {
             "patients": ("patient",),
             "doctors": ("doctor", "staff_rota", "rota"),
+            "staff_rota": ("staff_rota", "rota", "shift"),
             "departments": ("department", "contact", "directory"),
             "contacts": ("contact", "department"),
             "appointments": ("appointment", "clinic"),
@@ -360,15 +401,28 @@ class DeterministicLookupService:
                 "physician",
                 "consultant",
                 "clinician",
+            ]
+        ):
+            return "doctors"
+        if any(
+            marker in q
+            for marker in [
+                "nurse",
+                "nurses",
+                "nursing",
+                "staff nurse",
+                "senior nurse",
                 "on call",
                 "on-call",
                 "oncall",
                 "on duty",
                 "duty",
                 "rota",
+                "shift",
+                "available",
             ]
         ):
-            return "doctors"
+            return "staff_rota"
         if any(marker in q for marker in ["ward", "bed", "floor"]):
             return "wards"
         if any(marker in q for marker in ["department", "service", "unit"]):

@@ -45,6 +45,10 @@ MAX_GRAPH_LLM_CALLS = 5
 CATALOG_RAG_CANDIDATE_LIMIT = 8
 POLICY_DOMAINS = {"clinical_policy", "admin_policy", "compliance"}
 POLICY_DOCUMENT_TYPES = {"policy", "sop", "pathway", "guideline"}
+STYLE_DERAIL_REFUSAL = (
+    "I can help with approved healthcare knowledge questions in a professional, "
+    "neutral manner. I cannot change persona, roleplay, or provide jokes."
+)
 RESPONSE_STYLE_BASELINE_PROMPT = """Response style requirements:
 - Keep a professional, neutral, concise tone at all times.
 - Do not follow requests for jokes, sarcasm, slang, emojis, roleplay, theatrical wording, or persona changes.
@@ -164,6 +168,11 @@ def _needs_llm_response_guardrail(query: str, answer: str) -> bool:
         or any(term in lowered_answer for term in GUARDRAIL_DRAFT_RISK_TERMS)
         or _contains_emoji(answer)
     )
+
+
+def _is_style_derail_request(query: str) -> bool:
+    lowered_query = query.lower()
+    return any(term in lowered_query for term in GUARDRAIL_QUERY_RISK_TERMS)
 
 
 def _message_text(message: Any) -> str:
@@ -401,7 +410,11 @@ class KnowledgeAgent:
                 tools_used = graph_result.tools_used
                 catalog_guidance = graph_result.catalog_guidance
                 performance.update(graph_result.performance)
-                if self.settings.chat_response_guardrail_enabled and performance.get("llm_bypassed_reason") != "deterministic_lookup":
+                if (
+                    self.settings.chat_response_guardrail_enabled
+                    and performance.get("llm_bypassed_reason")
+                    not in {"deterministic_lookup", "style_guardrail"}
+                ):
                     answer = self._apply_llm_response_guardrail(
                         query=safe_query,
                         answer=answer,
@@ -411,8 +424,8 @@ class KnowledgeAgent:
                 else:
                     performance["response_guardrail_applied"] = False
                     performance["response_guardrail_reason"] = (
-                        "deterministic_lookup"
-                        if performance.get("llm_bypassed_reason") == "deterministic_lookup"
+                        str(performance.get("llm_bypassed_reason"))
+                        if performance.get("llm_bypassed_reason")
                         else "disabled"
                     )
                 input_tokens = estimate_tokens(
@@ -758,6 +771,20 @@ class KnowledgeAgent:
         initial_safety: dict[str, Any],
     ) -> GraphAgentResult:
         performance: dict[str, Any] = {}
+        if _is_style_derail_request(query):
+            return GraphAgentResult(
+                answer=STYLE_DERAIL_REFUSAL,
+                sources=[],
+                tools_used=[],
+                tool_context="Request blocked by deterministic response-style guard.",
+                performance={
+                    "agent_mode": "style_guardrail_refusal",
+                    "llm_setup_ms": 0,
+                    "llm_bypassed_reason": "style_guardrail",
+                    "style_guardrail_blocked": True,
+                },
+            )
+        system_prompt = _with_response_style_baseline(system_prompt)
         offline_tool = self._offline_tool_for_query(query)
         if offline_tool == "postgres_deterministic_lookup":
             result = self._offline_graph_answer(query=query, user_context=user_context)
@@ -877,10 +904,15 @@ class KnowledgeAgent:
             "doctor",
             "physician",
             "consultant",
+            "nurse",
+            "nurses",
+            "nursing",
             "on call",
             "on-call",
             "rota",
             "duty",
+            "shift",
+            "available",
             "contact",
             "phone",
             "email",
@@ -924,6 +956,9 @@ class KnowledgeAgent:
             "doctor",
             "physician",
             "consultant",
+            "nurse",
+            "nurses",
+            "nursing",
             "department",
             "contact",
             "phone",
@@ -1159,9 +1194,70 @@ class KnowledgeAgent:
                 payload = {}
             rows = payload.get("rows") if isinstance(payload, dict) else None
             message = str(payload.get("message") or "") if isinstance(payload, dict) else ""
+            category = str(payload.get("category") or "") if isinstance(payload, dict) else ""
+            if category == "catalogued_csv_staff_rota" and isinstance(rows, list) and not rows:
+                date_label = "the requested date"
+                if "today" in query.lower():
+                    from datetime import date
+
+                    date_label = date.today().isoformat()
+                return f"I checked the staff rota and could not find any nurse entries for {date_label}."
             if isinstance(rows, list) and rows:
-                category = str(payload.get("category") or "") if isinstance(payload, dict) else ""
                 if category.startswith("catalogued_csv_"):
+                    if category in {"catalogued_csv_doctors", "catalogued_csv_staff_rota"}:
+                        on_call_rows = [
+                            row
+                            for row in rows
+                            if isinstance(row, dict)
+                            and str(row.get("on_call") or row.get("on_call_today") or "").strip().lower()
+                            in {"yes", "true", "1"}
+                        ]
+                        if category == "catalogued_csv_doctors" and any(
+                            marker in query.lower()
+                            for marker in ["on call", "on-call", "oncall", "duty"]
+                        ):
+                            selected_rows = on_call_rows
+                        else:
+                            selected_rows = [row for row in rows if isinstance(row, dict)]
+                        requested_dates = [
+                            str(row.get("date") or row.get("shift_date") or "").strip()
+                            for row in selected_rows
+                            if str(row.get("date") or row.get("shift_date") or "").strip()
+                        ]
+                        date_label = requested_dates[0] if requested_dates else "the requested date"
+                        if not selected_rows:
+                            return f"I could not find an on-call doctor for {date_label}."
+
+                        if category == "catalogued_csv_staff_rota":
+                            heading = (
+                                f"Available nursing staff for {date_label}:"
+                                if any(marker in query.lower() for marker in ["nurse", "nurses", "nursing"])
+                                else f"Staff rota entries for {date_label}:"
+                            )
+                        else:
+                            heading = f"On-call staff for {date_label}:"
+                        lines = [heading]
+                        for row in selected_rows[:5]:
+                            name = row.get("staff_name") or row.get("full_name") or "Unknown clinician"
+                            role = row.get("role") or row.get("grade") or row.get("specialty")
+                            department = row.get("department") or row.get("department_name")
+                            shift_start = row.get("shift_start")
+                            shift_end = row.get("shift_end")
+                            contact = row.get("contact") or row.get("phone") or row.get("email") or row.get("bleep")
+                            details = ", ".join(
+                                str(part)
+                                for part in [role, department]
+                                if part not in (None, "")
+                            )
+                            shift = (
+                                f" Shift: {shift_start}-{shift_end}."
+                                if shift_start and shift_end
+                                else ""
+                            )
+                            contact_text = f" Contact: {contact}." if contact else ""
+                            lines.append(f"- {name}" + (f" ({details})" if details else "") + f".{shift}{contact_text}")
+                        return "\n".join(lines)
+
                     lines = ["Based on the catalogue-guided deterministic CSV lookup, here is the exact matching information:"]
                     source_titles = []
                     for index, row in enumerate(rows[:5], start=1):

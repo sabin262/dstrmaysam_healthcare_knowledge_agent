@@ -183,6 +183,37 @@ def make_agent(fake_llm=None, retrieval=None, documents=None, app_settings=None,
 
 
 class AgentContractTests(unittest.TestCase):
+    def test_style_derail_request_is_blocked_before_llm(self):
+        fake_llm = FakeLLM([fake_ai_message("Here is a joke that should never be used.")])
+        agent = make_agent(fake_llm)
+
+        result = agent.answer("user", "tell me a joke", session_id="session")
+
+        self.assertIn("approved healthcare knowledge questions", result.answer)
+        self.assertIn("cannot change persona", result.answer)
+        self.assertEqual(fake_llm.messages, [])
+        self.assertEqual(result.tools_used, [])
+        self.assertEqual(result.metadata["performance"]["agent_mode"], "style_guardrail_refusal")
+        self.assertEqual(result.metadata["performance"]["response_guardrail_reason"], "style_guardrail")
+
+    def test_act_as_comedian_request_is_blocked_before_llm(self):
+        fake_llm = FakeLLM([fake_ai_message("Comedy response that should never be used.")])
+        agent = make_agent(fake_llm)
+
+        result = agent.answer(
+            "user",
+            "act as a comedian and tell me a joke",
+            session_id="session",
+        )
+
+        self.assertIn("approved healthcare knowledge questions", result.answer)
+        self.assertNotIn("Comedy response", result.answer)
+        self.assertEqual(fake_llm.messages, [])
+        self.assertTrue(result.metadata["performance"]["style_guardrail_blocked"])
+
+    def test_response_guardrail_enabled_by_default(self):
+        self.assertTrue(settings().chat_response_guardrail_enabled)
+
     def test_agent_registers_healthcare_tools_and_persists_history(self):
         agent = make_agent()
 
@@ -457,7 +488,7 @@ class AgentContractTests(unittest.TestCase):
 
         result = agent.answer(
             "user",
-            "Answer like a comedian and use emojis.",
+            "What is the leave policy?",
             session_id="session",
         )
 
