@@ -3,6 +3,7 @@ from unittest import mock
 
 from backend.app.auth import AuthService, AuthenticationError, UserManagementError, hash_password
 from backend.app.config import AppSettings
+from backend.app.history import ChatMessage, InMemoryChatHistoryRepository
 from backend.app.secrets import StaticSecretProvider
 from backend.app.storage import DocumentRecord
 
@@ -232,18 +233,60 @@ class FakeIngestionJob:
         }
 
 
+class FakePatientLookup:
+    def __init__(self):
+        self.calls = []
+
+    def patient_dashboard(self, **kwargs):
+        self.calls.append(kwargs)
+        return {
+            "available_tables": ["patients", "appointments"],
+            "access_scopes_applied": ["all_staff", "clinical"],
+            "filters": {
+                "query": kwargs.get("query"),
+                "patient_identifier": kwargs.get("patient_identifier"),
+                "department": kwargs.get("department"),
+                "ward": kwargs.get("ward"),
+                "care_status": kwargs.get("care_status"),
+                "tables": kwargs.get("tables"),
+                "limit": kwargs.get("limit"),
+            },
+            "summary": {
+                "row_count": 1,
+                "unique_patients": 1,
+                "table_counts": {"patients": 1},
+                "message": "Found 1 matching row(s).",
+            },
+            "rows": [
+                {
+                    "table": "patients",
+                    "patient_id": "PAT-001",
+                    "mrn": "MRN10001",
+                    "patient_name": "John Spencer",
+                    "department_name": "Cardiology",
+                    "ward_code": "W02",
+                    "care_status": "Inpatient",
+                }
+            ],
+        }
+
+
 class AdminDocumentApiTests(unittest.TestCase):
     @unittest.skipIf(TestClient is None, "FastAPI test dependencies are not installed")
     def setUp(self):
         self.settings = app_settings()
         self.auth = make_auth_service()
         self.documents = FakeDocumentStore()
+        self.history = InMemoryChatHistoryRepository()
+        self.patient_lookup = FakePatientLookup()
         FakeIngestionJob.calls = 0
         self.patches = [
             mock.patch.object(main, "get_auth_service", lambda: self.auth),
             mock.patch.object(main, "get_settings", lambda: self.settings),
             mock.patch.object(main, "get_document_store", lambda: self.documents),
             mock.patch.object(main, "get_agent", lambda: FakeAgent()),
+            mock.patch.object(main, "get_history_repository", lambda: self.history),
+            mock.patch.object(main, "get_deterministic_lookup_service", lambda: self.patient_lookup),
             mock.patch.object(main, "get_secret_provider", lambda: self.auth.secret_provider),
             mock.patch.object(main, "IngestionJob", FakeIngestionJob),
         ]
@@ -314,6 +357,76 @@ class AdminDocumentApiTests(unittest.TestCase):
         self.assertEqual(document["chunk_count"], 4)
         self.assertEqual(document["ingestion_status"], "indexed")
         self.assertEqual(document["metadata"]["domain"], "admin_policy")
+
+    def test_admin_dashboard_returns_query_summary(self):
+        self.history.save_message(
+            "staff",
+            "session-1",
+            ChatMessage(role="user", content="What is the leave policy?"),
+        )
+        self.history.save_message(
+            "staff",
+            "session-1",
+            ChatMessage(
+                role="assistant",
+                content="The leave policy is available.",
+                metadata={
+                    "trace_id": "trace-123",
+                    "tools_used": ["rag_search"],
+                    "latency_ms": 1200,
+                    "input_tokens": 10,
+                    "output_tokens": 6,
+                    "model": "gpt-4.1-mini",
+                    "sources": [{"uri": "s3://bucket/raw/policy.md"}],
+                    "source_document_keys": ["raw/policy.md"],
+                    "guardrail_applied": False,
+                    "performance": {"agent_mode": "fast_rag"},
+                    "safety": {"risk_level": "low"},
+                },
+            ),
+        )
+
+        response = self.client.get(
+            "/admin/dashboard",
+            headers=self.headers_for("admin", "adminpass1"),
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["summary"]["total_queries"], 1)
+        self.assertEqual(payload["summary"]["avg_input_tokens"], 10)
+        self.assertEqual(payload["summary"]["avg_output_tokens"], 6)
+        self.assertEqual(payload["summary"]["avg_total_tokens"], 16)
+        self.assertEqual(payload["summary"]["tool_counts"]["rag_search"], 1)
+        self.assertEqual(payload["summary"]["model_counts"]["gpt-4.1-mini"], 1)
+        self.assertEqual(payload["queries"][0]["user_id"], "staff")
+        self.assertEqual(payload["queries"][0]["trace_id"], "trace-123")
+        self.assertEqual(payload["queries"][0]["total_tokens"], 16)
+        self.assertEqual(payload["queries"][0]["source_document_keys"], ["raw/policy.md"])
+
+    def test_admin_patient_details_uses_postgres_lookup_filters(self):
+        response = self.client.get(
+            "/admin/patient-details",
+            headers=self.headers_for("admin", "adminpass1"),
+            params={
+                "q": "john",
+                "patient_identifier": "MRN10001",
+                "department": "Cardiology",
+                "ward": "W02",
+                "care_status": "Inpatient",
+                "tables": ["patients"],
+                "limit": 25,
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["summary"]["row_count"], 1)
+        self.assertEqual(payload["rows"][0]["patient_id"], "PAT-001")
+        self.assertEqual(self.patient_lookup.calls[0]["query"], "john")
+        self.assertEqual(self.patient_lookup.calls[0]["patient_identifier"], "MRN10001")
+        self.assertEqual(self.patient_lookup.calls[0]["tables"], ["patients"])
+        self.assertEqual(self.patient_lookup.calls[0]["limit"], 25)
 
 
 if __name__ == "__main__":

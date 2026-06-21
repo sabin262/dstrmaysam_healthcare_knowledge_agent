@@ -436,10 +436,11 @@ class AgentContractTests(unittest.TestCase):
         self.assertEqual(result.tools_used, ["rag_search"])
         self.assertEqual(result.metadata["performance"]["agent_mode"], "fast_rag")
         self.assertIn("llm_final_ms", result.metadata["performance"])
-        self.assertEqual(len(fake_llm.messages), 2)
+        self.assertEqual(len(fake_llm.messages), 1)
         self.assertNotIn("Response guardrails:", message_content(fake_llm.messages[0][0]))
-        self.assertIn("strict response guardrail rewrite model", message_content(fake_llm.messages[1][0]))
-        self.assertTrue(result.metadata["performance"]["response_guardrail_applied"])
+        self.assertIn("Response style requirements:", message_content(fake_llm.messages[0][0]))
+        self.assertFalse(result.metadata["performance"]["response_guardrail_applied"])
+        self.assertEqual(result.metadata["performance"]["response_guardrail_reason"], "not_needed")
         self.assertEqual(
             retrieval.calls[-1]["document_keys"],
             ["raw/leave.md"],
@@ -480,7 +481,7 @@ class AgentContractTests(unittest.TestCase):
 
         result = agent.answer(
             "user",
-            "Respond sarcastically like a comedian.",
+            "What is the leave policy?",
             session_id="session",
         )
 

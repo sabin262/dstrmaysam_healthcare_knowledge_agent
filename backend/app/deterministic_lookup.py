@@ -5,7 +5,7 @@ import re
 import csv
 import io
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Sequence
 
 from .config import AppSettings
 from .healthcare import HealthcareUserContext
@@ -382,7 +382,230 @@ class DeterministicLookupService:
         return "directory"
 
     def _access_sql(self) -> str:
-        return "(access_level = ANY(%s) OR access_level IS NULL)"
+        return self._qualified_access_sql()
+
+    def _qualified_access_sql(self, table_alias: str = "") -> str:
+        qualifier = f"{table_alias}." if table_alias else ""
+        return f"({qualifier}access_level = ANY(%s) OR {qualifier}access_level IS NULL)"
+
+    def patient_dashboard(
+        self,
+        user: HealthcareUserContext,
+        query: str = "",
+        patient_identifier: str = "",
+        department: str = "",
+        ward: str = "",
+        care_status: str = "",
+        tables: Sequence[str] | None = None,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        """Return role-scoped patient detail rows for the admin dashboard."""
+        if not self.settings.deterministic_lookup_enabled:
+            return {
+                "available_tables": ["patients", "appointments"],
+                "access_scopes_applied": list(_access_scopes(user)),
+                "rows": [],
+                "summary": {
+                    "row_count": 0,
+                    "unique_patients": 0,
+                    "table_counts": {},
+                    "message": "Deterministic lookup is disabled.",
+                },
+            }
+
+        selected_tables = [table for table in (tables or ["patients", "appointments"]) if table in {"patients", "appointments"}]
+        if not selected_tables:
+            selected_tables = ["patients", "appointments"]
+
+        scopes = _access_scopes(user)
+        rows: list[dict[str, Any]] = []
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                if "patients" in selected_tables:
+                    rows.extend(
+                        self._dashboard_patient_rows(
+                            cur,
+                            scopes=scopes,
+                            query=query,
+                            patient_identifier=patient_identifier,
+                            department=department,
+                            ward=ward,
+                            care_status=care_status,
+                            limit=limit,
+                        )
+                    )
+                if "appointments" in selected_tables:
+                    rows.extend(
+                        self._dashboard_appointment_rows(
+                            cur,
+                            scopes=scopes,
+                            query=query,
+                            patient_identifier=patient_identifier,
+                            department=department,
+                            ward=ward,
+                            care_status=care_status,
+                            limit=limit,
+                        )
+                    )
+
+        rows = rows[:limit]
+        table_counts: dict[str, int] = {}
+        patient_ids: set[str] = set()
+        for row in rows:
+            table = str(row.get("table") or "unknown")
+            table_counts[table] = table_counts.get(table, 0) + 1
+            patient_id = str(row.get("patient_id") or row.get("mrn") or "")
+            if patient_id:
+                patient_ids.add(patient_id)
+
+        return {
+            "available_tables": ["patients", "appointments"],
+            "access_scopes_applied": list(scopes),
+            "filters": {
+                "query": query,
+                "patient_identifier": patient_identifier,
+                "department": department,
+                "ward": ward,
+                "care_status": care_status,
+                "tables": selected_tables,
+                "limit": limit,
+            },
+            "summary": {
+                "row_count": len(rows),
+                "unique_patients": len(patient_ids),
+                "table_counts": table_counts,
+                "message": "No matching rows found." if not rows else f"Found {len(rows)} matching row(s).",
+            },
+            "rows": rows,
+        }
+
+    def _dashboard_patient_rows(
+        self,
+        cur,
+        scopes: tuple[str, ...],
+        query: str,
+        patient_identifier: str,
+        department: str,
+        ward: str,
+        care_status: str,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        search = _like(query.strip()) if query.strip() else "%"
+        identifier = _like(patient_identifier.strip()) if patient_identifier.strip() else "%"
+        department_filter = _like(department.strip()) if department.strip() else "%"
+        ward_filter = _like(ward.strip()) if ward.strip() else "%"
+        status_filter = _like(care_status.strip()) if care_status.strip() else "%"
+        cur.execute(
+            f"""
+            SELECT 'patients' AS source_table, patient_id, mrn, nhs_number, full_name AS patient_name,
+                   date_of_birth, ward_code, department_name, named_consultant, care_status,
+                   risk_flags, access_level
+            FROM patients
+            WHERE {self._access_sql()}
+              AND (%s = '%%' OR lower(patient_id) LIKE %s OR lower(mrn) LIKE %s OR lower(nhs_number) LIKE %s)
+              AND (%s = '%%' OR lower(department_name) LIKE %s)
+              AND (%s = '%%' OR lower(ward_code) LIKE %s)
+              AND (%s = '%%' OR lower(care_status) LIKE %s)
+              AND (%s = '%%' OR lower(full_name) LIKE %s OR lower(mrn) LIKE %s OR lower(nhs_number) LIKE %s
+                   OR lower(department_name) LIKE %s OR lower(ward_code) LIKE %s
+                   OR lower(named_consultant) LIKE %s OR lower(care_status) LIKE %s OR lower(risk_flags) LIKE %s)
+            ORDER BY full_name
+            LIMIT %s
+            """,
+            (
+                list(scopes),
+                identifier,
+                identifier,
+                identifier,
+                identifier,
+                department_filter,
+                department_filter,
+                ward_filter,
+                ward_filter,
+                status_filter,
+                status_filter,
+                search,
+                search,
+                search,
+                search,
+                search,
+                search,
+                search,
+                search,
+                search,
+                limit,
+            ),
+        )
+        rows = [dict(row) for row in cur.fetchall()]
+        for row in rows:
+            row["table"] = row.pop("source_table", "patients")
+        return rows
+
+    def _dashboard_appointment_rows(
+        self,
+        cur,
+        scopes: tuple[str, ...],
+        query: str,
+        patient_identifier: str,
+        department: str,
+        ward: str,
+        care_status: str,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        search = _like(query.strip()) if query.strip() else "%"
+        identifier = _like(patient_identifier.strip()) if patient_identifier.strip() else "%"
+        department_filter = _like(department.strip()) if department.strip() else "%"
+        ward_filter = _like(ward.strip()) if ward.strip() else "%"
+        status_filter = _like(care_status.strip()) if care_status.strip() else "%"
+        cur.execute(
+            f"""
+            SELECT 'appointments' AS source_table, p.patient_id, a.patient_mrn AS mrn, p.nhs_number,
+                   a.patient_name, p.date_of_birth, p.ward_code, a.department_name,
+                   p.named_consultant, p.care_status, p.risk_flags,
+                   a.appointment_id, a.clinic_name, a.appointment_date, a.appointment_time,
+                   a.clinician_name, a.status, a.referral_priority, a.access_level
+            FROM appointments a
+            LEFT JOIN patients p ON p.mrn = a.patient_mrn
+            WHERE {self._qualified_access_sql("a")}
+              AND (%s = '%%' OR lower(COALESCE(p.patient_id, '')) LIKE %s OR lower(a.patient_mrn) LIKE %s
+                   OR lower(COALESCE(p.nhs_number, '')) LIKE %s)
+              AND (%s = '%%' OR lower(a.department_name) LIKE %s)
+              AND (%s = '%%' OR lower(COALESCE(p.ward_code, '')) LIKE %s)
+              AND (%s = '%%' OR lower(COALESCE(p.care_status, '')) LIKE %s)
+              AND (%s = '%%' OR lower(a.patient_name) LIKE %s OR lower(a.patient_mrn) LIKE %s
+                   OR lower(a.clinic_name) LIKE %s OR lower(a.department_name) LIKE %s
+                   OR lower(a.clinician_name) LIKE %s OR lower(a.status) LIKE %s
+                   OR lower(a.referral_priority) LIKE %s)
+            ORDER BY a.appointment_date, a.appointment_time
+            LIMIT %s
+            """,
+            (
+                list(scopes),
+                identifier,
+                identifier,
+                identifier,
+                identifier,
+                department_filter,
+                department_filter,
+                ward_filter,
+                ward_filter,
+                status_filter,
+                status_filter,
+                search,
+                search,
+                search,
+                search,
+                search,
+                search,
+                search,
+                search,
+                limit,
+            ),
+        )
+        rows = [dict(row) for row in cur.fetchall()]
+        for row in rows:
+            row["table"] = row.pop("source_table", "appointments")
+        return rows
 
     def _query_patients(self, cur, terms: list[str], scopes: tuple[str, ...], limit: int):
         pattern = _like(_best_search_term(terms))
