@@ -261,6 +261,7 @@ class LocalChromaRetrievalService(LocalChromaEmbeddingMixin, LocalChromaCollecti
         self._embeddings: Any | None = None
         self._collection: Any | None = None
         self.last_timing_ms: dict[str, int] = {}
+        self._raw_chunk_cache: dict[str, dict[str, Any]] = {}
 
     def search(
         self,
@@ -331,19 +332,14 @@ class LocalChromaRetrievalService(LocalChromaEmbeddingMixin, LocalChromaCollecti
             path = self._path_for_key(key)
             if not path.exists() or not path.is_file():
                 continue
-            try:
-                document = parse_document(key, path.read_bytes())
-            except Exception:
+            cached = self._raw_chunks_for_record(key, record, path)
+            if cached is None:
                 continue
-            chunks = chunk_text(
-                document.text,
-                chunk_size=self.settings.ingestion_chunk_size,
-                chunk_overlap=self.settings.ingestion_chunk_overlap,
-            )
-            metadata = dict(record.get("metadata") or document.metadata)
+            chunks = cached["chunks"]
+            metadata = cached["metadata"]
             base_haystack = " ".join(
                 [
-                    str(record.get("title") or document.title),
+                    str(cached["title"]),
                     key,
                     json.dumps(metadata, sort_keys=True),
                 ]
@@ -356,13 +352,13 @@ class LocalChromaRetrievalService(LocalChromaEmbeddingMixin, LocalChromaCollecti
                         **metadata,
                         "_key": key,
                         "_chunk_index": chunk_index,
-                        "_content_type": document.content_type,
-                        "_checksum": document.checksum,
+                        "_content_type": cached["content_type"],
+                        "_checksum": cached["document_checksum"],
                         "_retrieval_strategy": "raw_keyword",
                     }
                     hits.append(
                         RetrievalHit(
-                            title=str(record.get("title") or document.title),
+                            title=str(cached["title"]),
                             uri=_local_uri(key),
                             text=chunk,
                             score=float(score),
@@ -371,6 +367,36 @@ class LocalChromaRetrievalService(LocalChromaEmbeddingMixin, LocalChromaCollecti
                     )
         hits.sort(key=lambda hit: hit.score or 0, reverse=True)
         return hits[:limit]
+
+    def _raw_chunks_for_record(
+        self,
+        key: str,
+        record: dict[str, Any],
+        path: Path,
+    ) -> dict[str, Any] | None:
+        checksum = str(record.get("checksum") or "")
+        cached = self._raw_chunk_cache.get(key)
+        if cached and cached.get("checksum") == checksum:
+            return cached
+        try:
+            document = parse_document(key, path.read_bytes())
+        except Exception:
+            return None
+        chunks = chunk_text(
+            document.text,
+            chunk_size=self.settings.ingestion_chunk_size,
+            chunk_overlap=self.settings.ingestion_chunk_overlap,
+        )
+        cached = {
+            "checksum": checksum or document.checksum,
+            "title": str(record.get("title") or document.title),
+            "content_type": document.content_type,
+            "document_checksum": document.checksum,
+            "metadata": dict(record.get("metadata") or document.metadata),
+            "chunks": chunks,
+        }
+        self._raw_chunk_cache[key] = cached
+        return cached
 
     def _load_manifest(self) -> dict[str, Any]:
         path = self._path_for_key(self.settings.s3_manifest_key)

@@ -44,6 +44,7 @@ class AppSettings:
     ingestion_chunk_overlap: int = 250
     rag_parallel_search_enabled: bool = False
     chat_background_history_save_enabled: bool = False
+    chat_response_guardrail_enabled: bool = False
     local_data_dir: str = "/app/data"
     chroma_persist_dir: str = "/app/data/chroma"
     chroma_collection: str = "dstrmaysam-healthcare-knowledge-agent"
@@ -100,12 +101,13 @@ class AppSettings:
             chat_fast_rag_enabled=_env_bool("CHAT_FAST_RAG_ENABLED", True),
             chat_fast_rag_min_query_terms=int(_env("CHAT_FAST_RAG_MIN_QUERY_TERMS", "3")),
             max_graph_llm_calls=int(_env("MAX_GRAPH_LLM_CALLS", "2")),
-            rag_top_k=int(_env("RAG_TOP_K", "10")),
+            rag_top_k=int(_env("RAG_TOP_K", "5")),
             rag_neighbor_chunks=int(_env("RAG_NEIGHBOR_CHUNKS", "1")),
             ingestion_chunk_size=int(_env("INGESTION_CHUNK_SIZE", "1500")),
             ingestion_chunk_overlap=int(_env("INGESTION_CHUNK_OVERLAP", "250")),
             rag_parallel_search_enabled=_env_bool("RAG_PARALLEL_SEARCH_ENABLED", True),
             chat_background_history_save_enabled=_env_bool("CHAT_BACKGROUND_HISTORY_SAVE_ENABLED", True),
+            chat_response_guardrail_enabled=_env_bool("CHAT_RESPONSE_GUARDRAIL_ENABLED", False),
             local_data_dir=_env("LOCAL_DATA_DIR", "/app/data"),
             chroma_persist_dir=_env("CHROMA_PERSIST_DIR", "/app/data/chroma"),
             chroma_collection=_env("CHROMA_COLLECTION", "dstrmaysam-healthcare-knowledge-agent"),
@@ -147,6 +149,7 @@ class AppSettings:
             "ingestion_chunk_overlap": self.ingestion_chunk_overlap,
             "rag_parallel_search_enabled": str(self.rag_parallel_search_enabled),
             "chat_background_history_save_enabled": str(self.chat_background_history_save_enabled),
+            "chat_response_guardrail_enabled": str(self.chat_response_guardrail_enabled),
             "local_data_dir": self.local_data_dir,
             "chroma_persist_dir": self.chroma_persist_dir,
             "chroma_collection": self.chroma_collection,

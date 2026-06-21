@@ -129,7 +129,7 @@ def build_healthcare_agent_tools(
         return json.dumps(assessment.as_dict(), indent=2)
 
     def postgres_deterministic_lookup(query: str) -> str:
-        """Exact Postgres lookup for patients, doctors, departments, contacts, appointments, wards, and formulary data."""
+        """Catalogue-guided exact CSV lookup, with Postgres fallback for operational healthcare data."""
         if deterministic_lookup is None:
             return json.dumps(
                 {
@@ -170,8 +170,9 @@ def build_healthcare_agent_tools(
         AgentTool(
             name="postgres_deterministic_lookup",
             description=(
-                "Exact Postgres lookup for patient details, contact information, doctor information, "
-                "department directory data, appointments, wards, and formulary facts."
+                "Catalogue-guided deterministic lookup for patient details, contact information, doctor information, "
+                "department directory data, appointments, wards, and formulary facts. It checks tagged CSV lookup "
+                "documents first and falls back to Postgres operational tables."
             ),
             run=postgres_deterministic_lookup,
         ),

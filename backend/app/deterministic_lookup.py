@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import json
 import re
+import csv
+import io
 from dataclasses import dataclass
 from typing import Any
 
 from .config import AppSettings
 from .healthcare import HealthcareUserContext
+from .storage import DocumentRecord, DocumentStore
 
 
 def _terms(query: str) -> list[str]:
@@ -30,6 +33,7 @@ STOPWORDS = {
     "with",
     "details",
     "detail",
+    "dept",
     "information",
     "info",
     "contact",
@@ -46,6 +50,13 @@ STOPWORDS = {
     "medicine",
     "drug",
     "restricted",
+    "on",
+    "call",
+    "oncall",
+    "today",
+    "available",
+    "duty",
+    "rota",
 }
 
 
@@ -96,10 +107,12 @@ class LookupResult:
 
 
 class DeterministicLookupService:
-    """Safe Postgres lookup service for exact operational healthcare data."""
+    """Catalogue-guided exact lookup over deterministic CSVs, with Postgres fallback."""
 
-    def __init__(self, settings: AppSettings):
+    def __init__(self, settings: AppSettings, documents: DocumentStore | None = None):
         self.settings = settings
+        self.documents = documents
+        self._csv_cache: dict[str, dict[str, Any]] = {}
 
     def lookup(self, query: str, user: HealthcareUserContext, limit: int = 10) -> LookupResult:
         if not self.settings.deterministic_lookup_enabled:
@@ -107,6 +120,10 @@ class DeterministicLookupService:
 
         category = self._classify(query)
         scopes = _access_scopes(user)
+        csv_result = self._lookup_catalogued_csv(category, query, user, scopes, limit)
+        if csv_result.rows:
+            return csv_result
+
         try:
             rows = self._lookup_category(category, query, scopes, limit)
         except Exception as exc:
@@ -119,6 +136,177 @@ class DeterministicLookupService:
 
         message = "No matching rows found." if not rows else f"Found {len(rows)} matching row(s)."
         return LookupResult(category, rows, scopes, message)
+
+    def _lookup_catalogued_csv(
+        self,
+        category: str,
+        query: str,
+        user: HealthcareUserContext,
+        scopes: tuple[str, ...],
+        limit: int,
+    ) -> LookupResult:
+        if self.documents is None:
+            return LookupResult(category, [], scopes, "No document store configured for deterministic CSV lookup.")
+        records = self._catalogue_candidates(category, query, user)
+        matches: list[dict[str, Any]] = []
+        for record in records[:4]:
+            for row in self._csv_rows(record):
+                if not self._row_allowed(row, scopes):
+                    continue
+                score = self._row_score(row, query, category)
+                if score <= 0:
+                    continue
+                matches.append(
+                    {
+                        "source": record.uri,
+                        "title": record.title,
+                        "lookup_category": record.metadata.get("lookup_category") or category,
+                        "score": score,
+                        **row,
+                    }
+                )
+        matches.sort(key=lambda row: int(row.get("score") or 0), reverse=True)
+        if matches and int(matches[0].get("score") or 0) >= 20:
+            top_score = int(matches[0].get("score") or 0)
+            matches = [row for row in matches if int(row.get("score") or 0) == top_score]
+        rows = matches[:limit]
+        message = "No matching deterministic CSV rows found." if not rows else f"Found {len(rows)} deterministic CSV row(s)."
+        return LookupResult(f"catalogued_csv_{category}", rows, scopes, message)
+
+    def _catalogue_candidates(
+        self,
+        category: str,
+        query: str,
+        user: HealthcareUserContext,
+    ) -> list[DocumentRecord]:
+        user_roles = {role.lower() for role in user.roles}
+        query_terms = set(_terms(query))
+        records: list[tuple[int, DocumentRecord]] = []
+        for record in self.documents.list_documents():
+            if not record.key.lower().endswith(".csv"):
+                continue
+            if "document_catalogue" in record.key.lower():
+                continue
+            if not self._document_allowed(record, user_roles):
+                continue
+            metadata = record.metadata
+            lookup_category = str(metadata.get("lookup_category") or "").lower()
+            domain = str(metadata.get("domain") or "").lower()
+            document_type = str(metadata.get("document_type") or "").lower()
+            haystack = " ".join(
+                [
+                    record.title,
+                    record.key,
+                    record.content_type,
+                    json.dumps(metadata, sort_keys=True),
+                ]
+            ).lower()
+            deterministic = (
+                domain in {"deterministic", "catalogue", "rota", "formulary"}
+                or document_type in {"lookup_table", "directory", "schedule", "table"}
+                or bool(lookup_category)
+                or self._category_file_hint(category, record.key)
+            )
+            if not deterministic:
+                continue
+            score = 0
+            if lookup_category == category:
+                score += 20
+            elif lookup_category and category in lookup_category:
+                score += 12
+            if category in haystack:
+                score += 8
+            score += sum(1 for term in query_terms if term and term in haystack)
+            if self._category_file_hint(category, record.key):
+                score += 10
+            if score:
+                records.append((score, record))
+        records.sort(key=lambda item: item[0], reverse=True)
+        sorted_records = [record for _, record in records]
+        exact_category_records = [
+            record
+            for record in sorted_records
+            if str(record.metadata.get("lookup_category") or "").lower() == category
+            or self._category_file_hint(category, record.key)
+        ]
+        return exact_category_records or sorted_records
+
+    def _document_allowed(self, record: DocumentRecord, user_roles: set[str]) -> bool:
+        allowed = record.metadata.get("allowed_roles") or []
+        if isinstance(allowed, str):
+            allowed = [allowed]
+        allowed_roles = {str(role).lower() for role in allowed}
+        return not allowed_roles or "staff" in allowed_roles or bool(user_roles & allowed_roles)
+
+    def _csv_rows(self, record: DocumentRecord) -> list[dict[str, Any]]:
+        checksum = str(record.metadata.get("checksum") or "")
+        cached = self._csv_cache.get(record.key)
+        if cached and cached.get("checksum") == checksum:
+            return list(cached.get("rows") or [])
+        try:
+            text = self.documents.read_text(record.key) if self.documents else ""
+            rows = [dict(row) for row in csv.DictReader(io.StringIO(text))]
+        except Exception:
+            rows = []
+        self._csv_cache[record.key] = {"checksum": checksum, "rows": rows}
+        return rows
+
+    def _row_allowed(self, row: dict[str, Any], scopes: tuple[str, ...]) -> bool:
+        access_level = str(row.get("access_level") or "").strip().lower()
+        return not access_level or access_level in scopes
+
+    def _row_score(self, row: dict[str, Any], query: str, category: str) -> int:
+        lowered_query = query.lower()
+        if category == "doctors" and any(marker in lowered_query for marker in ["on call", "on-call", "oncall", "duty", "rota"]):
+            if str(row.get("on_call") or row.get("on_call_today") or "").strip().lower() not in {"yes", "true", "1"}:
+                return 0
+        terms = [term for term in _terms(query) if term not in STOPWORDS]
+        if not terms:
+            return 1
+        haystack = json.dumps(row, sort_keys=True).lower()
+        score = 0
+        for term in terms:
+            if not term:
+                continue
+            weighted_columns = {
+                "contacts": (("department", 30), ("contact_name", 6), ("role", 4), ("escalation_type", 3)),
+                "departments": (("department", 30), ("department_name", 30), ("service_lead", 4)),
+                "doctors": (("staff_name", 20), ("full_name", 20), ("department", 12), ("role", 6)),
+                "wards": (("ward_name", 20), ("ward_code", 20), ("specialty", 16)),
+                "appointments": (("clinic_name", 20), ("department", 12), ("patient_name", 10)),
+                "formulary": (("medicine", 20), ("medicine_name", 20), ("category", 8)),
+            }.get(category, ())
+            matched_weighted_column = False
+            for column, weight in weighted_columns:
+                value = str(row.get(column) or "").lower()
+                if re.search(rf"\b{re.escape(term)}\b", value):
+                    score += weight
+                    matched_weighted_column = True
+                    break
+                if term in value:
+                    score += max(1, weight // 2)
+                    matched_weighted_column = True
+                    break
+            if matched_weighted_column:
+                continue
+            if re.search(rf"\b{re.escape(term)}\b", haystack):
+                score += 2
+            elif term in haystack:
+                score += 1
+        return score
+
+    def _category_file_hint(self, category: str, key: str) -> bool:
+        lowered = key.lower()
+        hints = {
+            "patients": ("patient",),
+            "doctors": ("doctor", "staff_rota", "rota"),
+            "departments": ("department", "contact", "directory"),
+            "contacts": ("contact", "department"),
+            "appointments": ("appointment", "clinic"),
+            "wards": ("ward", "directory"),
+            "formulary": ("formulary", "medication", "medicine"),
+        }
+        return any(hint in lowered for hint in hints.get(category, ()))
 
     def _connect(self):
         try:
@@ -165,16 +353,30 @@ class DeterministicLookupService:
         q = query.lower()
         if any(marker in q for marker in ["patient", "mrn", "nhs", "date of birth", "dob"]):
             return "patients"
-        if any(marker in q for marker in ["doctor", "physician", "consultant", "clinician"]):
+        if any(
+            marker in q
+            for marker in [
+                "doctor",
+                "physician",
+                "consultant",
+                "clinician",
+                "on call",
+                "on-call",
+                "oncall",
+                "on duty",
+                "duty",
+                "rota",
+            ]
+        ):
             return "doctors"
+        if any(marker in q for marker in ["ward", "bed", "floor"]):
+            return "wards"
         if any(marker in q for marker in ["department", "service", "unit"]):
             return "departments"
         if any(marker in q for marker in ["contact", "phone", "email", "bleep", "extension"]):
             return "contacts"
         if any(marker in q for marker in ["appointment", "clinic", "slot", "referral"]):
             return "appointments"
-        if any(marker in q for marker in ["ward", "bed", "floor"]):
-            return "wards"
         if any(marker in q for marker in ["medicine", "drug", "formulary", "restricted", "dose"]):
             return "formulary"
         return "directory"
@@ -200,7 +402,8 @@ class DeterministicLookupService:
 
     def _query_doctors(self, cur, query: str, terms: list[str], scopes: tuple[str, ...], limit: int):
         pattern = _like(_best_search_term(terms))
-        on_call_only = "on call" in query.lower() or "on-call" in query.lower()
+        lowered = query.lower()
+        on_call_only = any(marker in lowered for marker in ["on call", "on-call", "oncall", "duty", "rota"])
         cur.execute(
             f"""
             SELECT doctor_id, full_name, grade, specialty, department_name, phone,

@@ -32,8 +32,30 @@ def infer_healthcare_metadata(key: str, checksum: str) -> dict[str, Any]:
     domain = "general"
     document_type = "document"
     allowed_roles = ["staff"]
+    lookup_category = ""
 
-    if any(marker in normalized for marker in ["clinical", "sop", "pathway", "guideline", "sepsis"]):
+    if normalized.endswith(".csv") and any(marker in normalized for marker in ["department_contacts", "contacts"]):
+        domain = "deterministic"
+        document_type = "lookup_table"
+        lookup_category = "contacts"
+    elif normalized.endswith(".csv") and any(marker in normalized for marker in ["ward_directory", "ward"]):
+        domain = "deterministic"
+        document_type = "lookup_table"
+        lookup_category = "wards"
+    elif normalized.endswith(".csv") and any(marker in normalized for marker in ["staff_rota", "rota", "on-call", "oncall"]):
+        domain = "deterministic"
+        document_type = "lookup_table"
+        lookup_category = "doctors"
+    elif normalized.endswith(".csv") and any(marker in normalized for marker in ["appointment", "clinic"]):
+        domain = "deterministic"
+        document_type = "lookup_table"
+        lookup_category = "appointments"
+    elif normalized.endswith(".csv") and any(marker in normalized for marker in ["formulary", "medicine", "drug", "restricted"]):
+        domain = "deterministic"
+        document_type = "lookup_table"
+        lookup_category = "formulary"
+        allowed_roles = ["doctor", "nurse", "pharmacy", "clinical_governance", "admin"]
+    elif any(marker in normalized for marker in ["clinical", "sop", "pathway", "guideline", "sepsis"]):
         domain = "clinical_policy"
         document_type = "policy"
         allowed_roles = ["doctor", "nurse", "clinical_governance", "admin"]
@@ -67,6 +89,7 @@ def infer_healthcare_metadata(key: str, checksum: str) -> dict[str, Any]:
         "sensitivity": "internal",
         "domain": domain,
         "document_type": document_type,
+        "lookup_category": lookup_category,
         "allowed_roles": allowed_roles,
     }
 

@@ -253,10 +253,11 @@ class KnowledgeAgent:
         self.redactor = PHIRedactor()
         self.safety = HealthcareSafetyGuard(self.redactor)
         self.audit = HealthcareAuditLogger()
-        self.deterministic_lookup = DeterministicLookupService(settings)
+        self.deterministic_lookup = DeterministicLookupService(settings, documents)
         self.tools = build_agent_tools(retrieval, documents)
         self._llm: Any | None = None
         self._llm_error: str | None = None
+        self._llm_checked = False
 
     def answer(
         self,
@@ -300,7 +301,11 @@ class KnowledgeAgent:
             try:
                 self.tools = original_tools + healthcare_tools
                 prompt_started = time.perf_counter()
-                system_prompt, prompt_version = self.observability.system_prompt()
+                if self._offline_tool_for_query(safe_query) == "postgres_deterministic_lookup":
+                    system_prompt, prompt_version = "", "deterministic_lookup"
+                    performance["langfuse_prompt_skipped_reason"] = "deterministic_lookup"
+                else:
+                    system_prompt, prompt_version = self.observability.system_prompt()
                 performance["langfuse_prompt_ms"] = _elapsed_ms(prompt_started)
                 safety_started = time.perf_counter()
                 initial_safety = self.safety.assess(safe_query, sources=[])
@@ -318,12 +323,20 @@ class KnowledgeAgent:
                 tools_used = graph_result.tools_used
                 catalog_guidance = graph_result.catalog_guidance
                 performance.update(graph_result.performance)
-                answer = self._apply_llm_response_guardrail(
-                    query=safe_query,
-                    answer=answer,
-                    sources=sources,
-                    performance=performance,
-                )
+                if self.settings.chat_response_guardrail_enabled and performance.get("llm_bypassed_reason") != "deterministic_lookup":
+                    answer = self._apply_llm_response_guardrail(
+                        query=safe_query,
+                        answer=answer,
+                        sources=sources,
+                        performance=performance,
+                    )
+                else:
+                    performance["response_guardrail_applied"] = False
+                    performance["response_guardrail_reason"] = (
+                        "deterministic_lookup"
+                        if performance.get("llm_bypassed_reason") == "deterministic_lookup"
+                        else "disabled"
+                    )
                 input_tokens = estimate_tokens(
                     "\n".join([system_prompt, history_context, graph_result.tool_context, query])
                 )
@@ -641,6 +654,14 @@ class KnowledgeAgent:
         initial_safety: dict[str, Any],
     ) -> GraphAgentResult:
         performance: dict[str, Any] = {}
+        offline_tool = self._offline_tool_for_query(query)
+        if offline_tool == "postgres_deterministic_lookup":
+            result = self._offline_graph_answer(query=query, user_context=user_context)
+            result.performance.update(performance)
+            result.performance["llm_setup_ms"] = 0
+            result.performance["llm_bypassed_reason"] = "deterministic_lookup"
+            return result
+
         user_prompt = self._graph_user_prompt(
             history_context=history_context,
             query=query,
@@ -754,6 +775,8 @@ class KnowledgeAgent:
             "consultant",
             "on call",
             "on-call",
+            "rota",
+            "duty",
             "contact",
             "phone",
             "email",
@@ -1001,6 +1024,9 @@ class KnowledgeAgent:
     def _get_llm(self) -> Any | None:
         if self._llm is not None:
             return self._llm
+        if self._llm_checked and self._llm_error:
+            return None
+        self._llm_checked = True
         try:
             from langchain_openai import AzureChatOpenAI
 
@@ -1030,6 +1056,55 @@ class KnowledgeAgent:
             rows = payload.get("rows") if isinstance(payload, dict) else None
             message = str(payload.get("message") or "") if isinstance(payload, dict) else ""
             if isinstance(rows, list) and rows:
+                category = str(payload.get("category") or "") if isinstance(payload, dict) else ""
+                if category.startswith("catalogued_csv_"):
+                    lines = ["Based on the catalogue-guided deterministic CSV lookup, here is the exact matching information:"]
+                    source_titles = []
+                    for index, row in enumerate(rows[:5], start=1):
+                        if not isinstance(row, dict):
+                            continue
+                        title = str(row.get("title") or "")
+                        source = str(row.get("source") or "")
+                        if title and title not in source_titles:
+                            source_titles.append(title)
+                        visible = {
+                            key: value
+                            for key, value in row.items()
+                            if key not in {"score", "source", "title", "lookup_category"}
+                            and value not in (None, "", [])
+                        }
+                        lines.append(f"{index}. " + "; ".join(f"{key}: {value}" for key, value in visible.items()))
+                    if source_titles:
+                        lines.append("\nSource document(s): " + ", ".join(source_titles[:3]))
+                    return "\n".join(lines)
+
+                if category == "doctors":
+                    on_call_rows = [row for row in rows if isinstance(row, dict) and row.get("on_call_today")]
+                    selected_rows = on_call_rows or rows
+                    heading = (
+                        "The following doctors are on call today:"
+                        if on_call_rows
+                        else "Based on the deterministic database lookup, here are the matching doctors:"
+                    )
+                    lines = [heading]
+                    for index, row in enumerate(selected_rows[:5], start=1):
+                        name = row.get("full_name") or "Unknown doctor"
+                        grade = row.get("grade")
+                        specialty = row.get("specialty")
+                        department = row.get("department_name")
+                        contact_parts = []
+                        if row.get("phone"):
+                            contact_parts.append(f"phone: {row['phone']}")
+                        if row.get("bleep"):
+                            contact_parts.append(f"bleep: {row['bleep']}")
+                        if row.get("email"):
+                            contact_parts.append(f"email: {row['email']}")
+                        role = ", ".join(str(part) for part in [grade, specialty, department] if part)
+                        contact = f" ({'; '.join(contact_parts)})" if contact_parts else ""
+                        lines.append(f"{index}. {name}" + (f" - {role}" if role else "") + contact)
+                    lines.append("\nSource: Postgres deterministic lookup.")
+                    return "\n".join(lines)
+
                 lines = [
                     "Based on the deterministic database lookup, here is the exact matching information:"
                 ]
