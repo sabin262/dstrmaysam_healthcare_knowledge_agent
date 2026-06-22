@@ -33,17 +33,24 @@ class AppSettings:
     prompt_label: str
     max_history_chars: int
     azure_openai_deployment: str = ""
+    azure_openai_fast_deployment: str = ""
     document_manifest_cache_ttl_seconds: int = 0
     langfuse_prompt_cache_ttl_seconds: int = 0
     chat_fast_rag_enabled: bool = False
+    chat_fast_planned_execution_enabled: bool = False
     chat_fast_rag_min_query_terms: int = 3
     max_graph_llm_calls: int = 5
     rag_top_k: int = 10
     rag_neighbor_chunks: int = 1
+    rag_query_cache_ttl_seconds: int = 0
+    rag_embedding_cache_size: int = 0
+    rag_context_max_chars: int = 9000
+    rag_snippet_chars: int = 900
     ingestion_chunk_size: int = 1500
     ingestion_chunk_overlap: int = 250
     rag_parallel_search_enabled: bool = False
     chat_background_history_save_enabled: bool = False
+    langfuse_background_trace_update_enabled: bool = False
     local_data_dir: str = "/app/data"
     chroma_persist_dir: str = "/app/data/chroma"
     chroma_collection: str = "dstrmaysam-healthcare-knowledge-agent"
@@ -77,6 +84,10 @@ class AppSettings:
                 "AZURE_OPENAI_SECRET_NAME", f"{default_prefix}/azure-openai"
             ),
             azure_openai_deployment=_env("AZURE_OPENAI_DEPLOYMENT", ""),
+            azure_openai_fast_deployment=_env(
+                "AZURE_OPENAI_FAST_DEPLOYMENT",
+                _env("AZURE_OPENAI_DEPLOYMENT", ""),
+            ),
             langfuse_secret_name=_env("LANGFUSE_SECRET_NAME", f"{default_prefix}/langfuse"),
             s3_bucket=_env("S3_BUCKET"),
             s3_raw_prefix=_env("S3_RAW_PREFIX", "raw/"),
@@ -98,14 +109,20 @@ class AppSettings:
                 _env("LANGFUSE_PROMPT_CACHE_TTL_SECONDS", "300")
             ),
             chat_fast_rag_enabled=_env_bool("CHAT_FAST_RAG_ENABLED", True),
+            chat_fast_planned_execution_enabled=_env_bool("CHAT_FAST_PLANNED_EXECUTION_ENABLED", True),
             chat_fast_rag_min_query_terms=int(_env("CHAT_FAST_RAG_MIN_QUERY_TERMS", "3")),
             max_graph_llm_calls=int(_env("MAX_GRAPH_LLM_CALLS", "2")),
             rag_top_k=int(_env("RAG_TOP_K", "10")),
             rag_neighbor_chunks=int(_env("RAG_NEIGHBOR_CHUNKS", "1")),
+            rag_query_cache_ttl_seconds=int(_env("RAG_QUERY_CACHE_TTL_SECONDS", "60")),
+            rag_embedding_cache_size=int(_env("RAG_EMBEDDING_CACHE_SIZE", "512")),
+            rag_context_max_chars=int(_env("RAG_CONTEXT_MAX_CHARS", "9000")),
+            rag_snippet_chars=int(_env("RAG_SNIPPET_CHARS", "900")),
             ingestion_chunk_size=int(_env("INGESTION_CHUNK_SIZE", "1500")),
             ingestion_chunk_overlap=int(_env("INGESTION_CHUNK_OVERLAP", "250")),
             rag_parallel_search_enabled=_env_bool("RAG_PARALLEL_SEARCH_ENABLED", True),
             chat_background_history_save_enabled=_env_bool("CHAT_BACKGROUND_HISTORY_SAVE_ENABLED", True),
+            langfuse_background_trace_update_enabled=_env_bool("LANGFUSE_BACKGROUND_TRACE_UPDATE_ENABLED", True),
             local_data_dir=_env("LOCAL_DATA_DIR", "/app/data"),
             chroma_persist_dir=_env("CHROMA_PERSIST_DIR", "/app/data/chroma"),
             chroma_collection=_env("CHROMA_COLLECTION", "dstrmaysam-healthcare-knowledge-agent"),
@@ -133,20 +150,27 @@ class AppSettings:
             "opensearch_configured": str(bool(self.opensearch_endpoint)),
             "opensearch_index": self.opensearch_index,
             "azure_openai_deployment": self.azure_openai_deployment,
+            "azure_openai_fast_deployment": self.azure_openai_fast_deployment,
             "chat_history_backend": self.chat_history_backend,
             "prompt_label": self.prompt_label,
             "max_history_chars": self.max_history_chars,
             "document_manifest_cache_ttl_seconds": self.document_manifest_cache_ttl_seconds,
             "langfuse_prompt_cache_ttl_seconds": self.langfuse_prompt_cache_ttl_seconds,
             "chat_fast_rag_enabled": str(self.chat_fast_rag_enabled),
+            "chat_fast_planned_execution_enabled": str(self.chat_fast_planned_execution_enabled),
             "chat_fast_rag_min_query_terms": self.chat_fast_rag_min_query_terms,
             "max_graph_llm_calls": self.max_graph_llm_calls,
             "rag_top_k": self.rag_top_k,
             "rag_neighbor_chunks": self.rag_neighbor_chunks,
+            "rag_query_cache_ttl_seconds": self.rag_query_cache_ttl_seconds,
+            "rag_embedding_cache_size": self.rag_embedding_cache_size,
+            "rag_context_max_chars": self.rag_context_max_chars,
+            "rag_snippet_chars": self.rag_snippet_chars,
             "ingestion_chunk_size": self.ingestion_chunk_size,
             "ingestion_chunk_overlap": self.ingestion_chunk_overlap,
             "rag_parallel_search_enabled": str(self.rag_parallel_search_enabled),
             "chat_background_history_save_enabled": str(self.chat_background_history_save_enabled),
+            "langfuse_background_trace_update_enabled": str(self.langfuse_background_trace_update_enabled),
             "local_data_dir": self.local_data_dir,
             "chroma_persist_dir": self.chroma_persist_dir,
             "chroma_collection": self.chroma_collection,

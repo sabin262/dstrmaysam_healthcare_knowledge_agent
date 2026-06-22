@@ -5,6 +5,7 @@ import re
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -29,7 +30,6 @@ from .tools import (
     build_agent_tools,
     catalog_query_terms,
     document_matches_catalog_query,
-    format_retrieval_hits,
 )
 
 
@@ -333,6 +333,10 @@ def _source_dicts_from_hits(hits: list[RetrievalHit]) -> list[dict[str, Any]]:
     ]
 
 
+def _access_scope_key(user_context: HealthcareUserContext) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    return (tuple(sorted(user_context.roles)), tuple(sorted(user_context.departments)))
+
+
 def _source_document_keys(sources: list[dict[str, Any]]) -> list[str]:
     keys: list[str] = []
     seen: set[str] = set()
@@ -497,7 +501,9 @@ class KnowledgeAgent:
         self.deterministic_lookup = DeterministicLookupService(settings)
         self.tools = build_agent_tools(retrieval, documents)
         self._llm: Any | None = None
+        self._fast_llm: Any | None = None
         self._llm_error: str | None = None
+        self._catalog_candidate_cache: dict[tuple[Any, ...], list[str]] = {}
 
     def answer(
         self,
@@ -642,7 +648,8 @@ class KnowledgeAgent:
                     latency_ms = _elapsed_ms(started)
                     performance["total_ms"] = latency_ms
                     assistant_message.metadata["latency_ms"] = latency_ms
-                trace.update(
+                self._update_trace_metadata(
+                    trace,
                     output={"answer": answer, "sources": sources},
                     metadata={
                         "tools_used": tools_used,
@@ -690,6 +697,22 @@ class KnowledgeAgent:
                 "performance": performance,
             },
         )
+
+    def _update_trace_metadata(
+        self,
+        trace: Any,
+        *,
+        output: dict[str, Any],
+        metadata: dict[str, Any],
+    ) -> None:
+        if not self.settings.langfuse_background_trace_update_enabled:
+            trace.update(output=output, metadata=metadata)
+            return
+        thread = threading.Thread(
+            target=lambda: trace.update(output=output, metadata=metadata),
+            daemon=True,
+        )
+        thread.start()
 
     def _run_tool(self, name: str, query: str) -> str:
         for tool in self.tools:
@@ -811,7 +834,7 @@ class KnowledgeAgent:
             performance["response_guardrail_changed"] = False
             return answer
 
-        llm = self._get_llm()
+        llm = self._get_llm(fast=True)
         if llm is None:
             performance["response_guardrail_applied"] = False
             performance["response_guardrail_reason"] = "llm_unavailable"
@@ -900,6 +923,14 @@ class KnowledgeAgent:
             records = self.access.filter_documents(user_context, self.documents.list_documents())
         except Exception:
             return []
+        cache_key = (
+            name,
+            " ".join(query.lower().split()),
+            _access_scope_key(user_context),
+            self._catalog_fingerprint(records),
+        )
+        if cache_key in self._catalog_candidate_cache:
+            return list(self._catalog_candidate_cache[cache_key])
 
         terms = catalog_query_terms(query)
         matches = [record for record in records if document_matches_catalog_query(record, query)]
@@ -920,7 +951,19 @@ class KnowledgeAgent:
             candidate_keys.append(record.key)
             if len(candidate_keys) >= CATALOG_RAG_CANDIDATE_LIMIT:
                 break
+        self._catalog_candidate_cache[cache_key] = list(candidate_keys)
         return candidate_keys
+
+    def _catalog_fingerprint(self, records: list[Any]) -> tuple[Any, ...]:
+        return tuple(
+            (
+                str(getattr(record, "key", "")),
+                int(getattr(record, "chunk_count", 0) or 0),
+                str(getattr(record, "ingestion_status", "")),
+                json.dumps(getattr(record, "metadata", {}) or {}, sort_keys=True),
+            )
+            for record in records
+        )
 
     def _catalog_match_score(self, record: Any, terms: list[str]) -> int:
         haystack = " ".join(
@@ -943,8 +986,30 @@ class KnowledgeAgent:
     ) -> tuple[str, list[dict[str, Any]], list[dict[str, Any]]]:
         if name in RETRIEVAL_SOURCE_TOOLS:
             hits, guidance = self._retrieval_hits_for_tool(name, query, user_context)
-            return format_retrieval_hits(hits), _source_dicts_from_hits(hits), [guidance]
+            return self._format_retrieval_hits(hits), _source_dicts_from_hits(hits), [guidance]
         return self._run_tool(name, query), [], []
+
+    def _format_retrieval_hits(self, hits: list[RetrievalHit]) -> str:
+        if not hits:
+            return "No relevant document chunks found."
+        snippet_chars = max(200, int(self.settings.rag_snippet_chars or 900))
+        lines: list[str] = []
+        for index, hit in enumerate(hits, start=1):
+            details = {
+                key: value
+                for key, value in {
+                    "chunk_index": hit.metadata.get("_chunk_index"),
+                    "domain": hit.metadata.get("domain"),
+                    "document_type": hit.metadata.get("document_type"),
+                }.items()
+                if value not in (None, "", {})
+            }
+            detail_text = f"\nMetadata: {json.dumps(details, sort_keys=True)}" if details else ""
+            lines.append(
+                f"[{index}] {hit.title} ({hit.uri}, score={hit.score}){detail_text}\n"
+                f"{hit.text[:snippet_chars]}"
+            )
+        return "\n\n".join(lines)
 
     def _tool_callables(self) -> list[Any]:
         callables: list[Any] = []
@@ -1016,9 +1081,21 @@ class KnowledgeAgent:
         config = {"callbacks": callbacks} if callbacks else None
         try:
             agent_started = time.perf_counter()
-            if self._should_use_fast_rag(query):
+            fast_planned_tools = self._fast_planned_tools(query)
+            if fast_planned_tools:
+                result = self._call_fast_planned_agent(
+                    llm=self._get_llm(fast=True) or llm,
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    original_query=query,
+                    user_context=user_context,
+                    config=config,
+                    planned_tools=fast_planned_tools,
+                )
+                result.performance["agent_mode"] = "fast_planned"
+            elif self._should_use_fast_rag(query):
                 result = self._call_fast_rag_agent(
-                    llm=llm,
+                    llm=self._get_llm(fast=True) or llm,
                     system_prompt=system_prompt,
                     user_prompt=user_prompt,
                     original_query=query,
@@ -1143,6 +1220,95 @@ class KnowledgeAgent:
             return False
         return _planned_tool_names(query) == ["rag_search"]
 
+    def _fast_planned_tools(self, query: str) -> list[str]:
+        if not self.settings.chat_fast_planned_execution_enabled:
+            return []
+        planned_tools = _planned_tool_names(query)
+        supported_tools = {"rag_search", "postgres_deterministic_lookup"}
+        if not planned_tools or any(tool not in supported_tools for tool in planned_tools):
+            return []
+        if planned_tools == ["rag_search"]:
+            return planned_tools if self._should_use_fast_rag(query) else []
+        return planned_tools
+
+    def _call_fast_planned_agent(
+        self,
+        *,
+        llm: Any,
+        system_prompt: str,
+        user_prompt: str,
+        original_query: str,
+        user_context: HealthcareUserContext,
+        config: dict[str, Any] | None,
+        planned_tools: list[str],
+    ) -> GraphAgentResult:
+        started = time.perf_counter()
+        if planned_tools == ["rag_search"]:
+            result = self._call_fast_rag_agent(
+                llm=llm,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                original_query=original_query,
+                user_context=user_context,
+                config=config,
+            )
+            result.performance["planned_tools"] = list(planned_tools)
+            return result
+
+        def run_tool(tool_name: str) -> tuple[str, str, list[dict[str, Any]], list[dict[str, Any]]]:
+            tool_output, sources, catalog_guidance = self._run_graph_tool(
+                tool_name,
+                original_query,
+                user_context,
+            )
+            return tool_name, tool_output, sources, catalog_guidance
+
+        max_workers = max(1, len(planned_tools))
+        if max_workers == 1:
+            results = [run_tool(planned_tools[0])]
+        else:
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = [executor.submit(run_tool, tool_name) for tool_name in planned_tools]
+                results = [future.result() for future in futures]
+
+        all_sources: list[dict[str, Any]] = []
+        all_guidance: list[dict[str, Any]] = []
+        tool_outputs: list[str] = []
+        for tool_name, tool_output, sources, catalog_guidance in results:
+            all_sources.extend(sources)
+            all_guidance.extend(catalog_guidance)
+            tool_outputs.append(f"{tool_name} results:\n{tool_output}")
+
+        tool_context = "\n\n".join(tool_outputs)
+        answer_prompt = (
+            f"{user_prompt}\n\n"
+            "Tool results:\n"
+            f"{self._bounded_context(tool_context)}\n\n"
+            "Answer the user using the tool results. Include citations when document sources are present. "
+            "For deterministic lookup results, preserve exact values and do not reinterpret them. "
+            "If the available context is insufficient, say what is missing."
+        )
+        llm_started = time.perf_counter()
+        response = self._invoke_model(
+            llm,
+            [_make_system_message(system_prompt), _make_human_message(answer_prompt)],
+            config,
+        )
+        performance: dict[str, Any] = {
+            "llm_final_ms": _elapsed_ms(llm_started),
+            "agent_execution_ms": _elapsed_ms(started),
+            "planned_tools": list(planned_tools),
+        }
+        _add_tool_timing(performance, all_guidance)
+        return GraphAgentResult(
+            answer=_message_text(response),
+            sources=_dedupe_sources(all_sources),
+            tools_used=list(planned_tools),
+            tool_context=self._bounded_context(tool_context),
+            catalog_guidance=all_guidance,
+            performance=performance,
+        )
+
     def _call_fast_rag_agent(
         self,
         *,
@@ -1161,7 +1327,7 @@ class KnowledgeAgent:
         answer_prompt = (
             f"{user_prompt}\n\n"
             "Retrieved knowledge context:\n"
-            f"{tool_context}\n\n"
+            f"{self._bounded_context(tool_context)}\n\n"
             "Answer the user using the retrieved context. Include citations when sources are present. "
             "If the retrieved context is insufficient, say what is missing."
         )
@@ -1180,9 +1346,18 @@ class KnowledgeAgent:
             answer=_message_text(response),
             sources=_dedupe_sources(sources),
             tools_used=["rag_search"],
-            tool_context=tool_context,
+            tool_context=self._bounded_context(tool_context),
             catalog_guidance=catalog_guidance,
             performance=performance,
+        )
+
+    def _bounded_context(self, tool_context: str) -> str:
+        max_chars = max(1000, int(self.settings.rag_context_max_chars or 9000))
+        if len(tool_context) <= max_chars:
+            return tool_context
+        return (
+            tool_context[:max_chars].rstrip()
+            + "\n\n[Context truncated to configured RAG_CONTEXT_MAX_CHARS.]"
         )
 
     def _invoke_model(self, model: Any, messages: list[Any], config: dict[str, Any] | None) -> Any:
@@ -1334,27 +1509,47 @@ class KnowledgeAgent:
             performance=dict(state.get("performance", {})),
         )
 
-    def _get_llm(self) -> Any | None:
-        if self._llm is not None:
+    def _get_llm(self, *, fast: bool = False) -> Any | None:
+        if fast:
+            fast_deployment = self.settings.azure_openai_fast_deployment or self.settings.azure_openai_deployment
+            normal_deployment = self.settings.azure_openai_deployment
+            if self._fast_llm is not None:
+                return self._fast_llm
+            if self._llm is not None and (not fast_deployment or fast_deployment == normal_deployment):
+                return self._llm
+        elif self._llm is not None:
             return self._llm
         try:
             from langchain_openai import AzureChatOpenAI
 
             secrets = self.secret_provider.load_azure_openai()
-            self._llm = AzureChatOpenAI(
+            deployment = secrets.fast_chat_deployment if fast else secrets.chat_deployment
+            llm = AzureChatOpenAI(
                 azure_endpoint=secrets.endpoint,
                 api_key=secrets.api_key,
                 api_version=secrets.api_version,
-                azure_deployment=secrets.chat_deployment,
+                azure_deployment=deployment,
                 temperature=0,
                 timeout=60,
                 max_retries=2,
             )
+            if fast:
+                self._fast_llm = llm
+            else:
+                self._llm = llm
             self._llm_error = None
         except Exception as exc:
             self._llm_error = f"{type(exc).__name__}: {exc}"
-            self._llm = None
-        return self._llm
+            if fast:
+                self._fast_llm = None
+            else:
+                self._llm = None
+        return self._fast_llm if fast else self._llm
+
+    def invalidate_caches(self) -> None:
+        self._catalog_candidate_cache.clear()
+        if hasattr(self.retrieval, "invalidate_cache"):
+            self.retrieval.invalidate_cache()
 
     def _offline_answer(self, *, query: str, tool_context: str) -> str:
         if (

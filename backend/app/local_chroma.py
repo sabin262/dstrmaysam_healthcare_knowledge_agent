@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import Any, Sequence
 
 from .config import AppSettings
-from .ingest import checksum_bytes, chunk_text, parse_document
+from .ingest import checksum_bytes, chunk_text, is_metadata_only_manifest_record, parse_document
 from .retrieval import RetrievalHit, RetrievalService
 from .secrets import SecretProvider
 
@@ -101,12 +102,17 @@ class LocalChromaIngestionJob(LocalChromaEmbeddingMixin, LocalChromaCollectionMi
         existing_by_key = {
             str(document.get("key", "")): document
             for document in existing_manifest.get("documents", [])
-            if isinstance(document, dict) and document.get("key")
+            if isinstance(document, dict) and document.get("key") and not is_metadata_only_manifest_record(document)
         }
+        metadata_only_documents = [
+            dict(document)
+            for document in existing_manifest.get("documents", [])
+            if isinstance(document, dict) and is_metadata_only_manifest_record(document)
+        ]
 
         raw_documents = self._load_raw_documents()
         seen_keys: set[str] = set()
-        manifest_documents: list[dict[str, Any]] = []
+        manifest_documents: list[dict[str, Any]] = list(metadata_only_documents)
         indexed_chunks = 0
         indexed_documents = 0
         skipped_documents = 0
@@ -260,6 +266,7 @@ class LocalChromaRetrievalService(LocalChromaEmbeddingMixin, LocalChromaCollecti
         self.local_data_dir = Path(settings.local_data_dir)
         self._embeddings: Any | None = None
         self._collection: Any | None = None
+        self._search_cache: dict[tuple[Any, ...], tuple[float, list[RetrievalHit], dict[str, int]]] = {}
         self.last_timing_ms: dict[str, int] = {}
 
     def search(
@@ -268,12 +275,16 @@ class LocalChromaRetrievalService(LocalChromaEmbeddingMixin, LocalChromaCollecti
         top_k: int | None = None,
         document_keys: Sequence[str] | None = None,
     ) -> list[RetrievalHit]:
-        import time
-
         started = time.perf_counter()
         result_limit = top_k or self.settings.rag_top_k
-        collection = self._get_collection()
         filtered_keys = list(dict.fromkeys(key for key in (document_keys or []) if key))
+        cache_key = self._search_cache_key(query, result_limit, filtered_keys)
+        cached = self._search_cache_get(cache_key)
+        if cached is not None:
+            hits, cached_timing = cached
+            self.last_timing_ms = {**cached_timing, "cache_hit": 1}
+            return list(hits)
+        collection = self._get_collection()
         vector = self._embed(query)
         if vector is not None:
             query_kwargs: dict[str, Any] = {
@@ -304,9 +315,58 @@ class LocalChromaRetrievalService(LocalChromaEmbeddingMixin, LocalChromaCollecti
             "keyword_hits": len(hits) if vector is None else 0,
             "neighbor_hits": len(neighbor_hits),
             "returned_hits": len(hits),
+            "cache_hit": 0,
             "total_ms": int((time.perf_counter() - started) * 1000),
         }
+        self._search_cache_set(cache_key, hits, self.last_timing_ms)
         return hits
+
+    def _search_cache_key(self, query: str, top_k: int, document_keys: list[str]) -> tuple[Any, ...]:
+        return (
+            " ".join(query.lower().split()),
+            tuple(document_keys),
+            self.settings.chroma_collection,
+            top_k,
+            self.settings.rag_neighbor_chunks,
+        )
+
+    def _search_cache_get(
+        self,
+        key: tuple[Any, ...],
+    ) -> tuple[list[RetrievalHit], dict[str, int]] | None:
+        ttl = max(0, self.settings.rag_query_cache_ttl_seconds)
+        if not ttl:
+            return None
+        cached = self._search_cache.get(key)
+        if cached is None:
+            return None
+        expires_at, hits, timing = cached
+        if time.monotonic() >= expires_at:
+            self._search_cache.pop(key, None)
+            return None
+        return list(hits), dict(timing)
+
+    def _search_cache_set(self, key: tuple[Any, ...], hits: list[RetrievalHit], timing: dict[str, int]) -> None:
+        ttl = max(0, self.settings.rag_query_cache_ttl_seconds)
+        if not ttl:
+            return
+        self._search_cache[key] = (time.monotonic() + ttl, list(hits), dict(timing))
+
+    def invalidate_cache(self) -> None:
+        self._search_cache.clear()
+
+    def delete_all_indexes(self) -> int:
+        collection = self._get_collection()
+        try:
+            existing = collection.get()
+            ids = list(existing.get("ids", []) or [])
+            if ids:
+                collection.delete(ids=ids)
+            deleted = len(ids)
+        except Exception:
+            deleted = 0
+        self.invalidate_cache()
+        return deleted
 
     def _raw_file_keyword_hits(
         self,

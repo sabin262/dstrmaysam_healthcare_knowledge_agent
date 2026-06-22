@@ -609,6 +609,39 @@ def render_admin_documents() -> None:
             except Exception as exc:
                 st.error(f"Ingestion failed: {exc}")
 
+    st.divider()
+    with st.expander("Delete all indexes"):
+        st.warning(
+            "This clears search/vector indexes and the document manifest. "
+            "Uploaded source files and deterministic Postgres CSV rows are preserved."
+        )
+        with st.form("delete-all-indexes"):
+            admin_password = st.text_input("Admin password", type="password")
+            confirm_delete = st.checkbox("I understand this will clear all indexed document entries")
+            delete_submitted = st.form_submit_button("Delete all indexes")
+        if delete_submitted:
+            if not admin_password:
+                st.error("Enter your admin password")
+                return
+            if not confirm_delete:
+                st.error("Confirm that you understand the index entries will be cleared")
+                return
+            try:
+                result = post_json(
+                    "/admin/documents/delete-indexes",
+                    {"admin_password": admin_password},
+                )
+                st.success(
+                    f"Deleted {result.get('deleted_chunks', 0)} indexed chunk(s) "
+                    f"from {result.get('backend', 'search')} and cleared the manifest."
+                )
+                st.session_state.document_cache = []
+                st.session_state.document_cache_loaded = True
+                st.session_state.document_cache_error = None
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Delete indexes failed: {exc}")
+
 
 def format_score(value: Any) -> str:
     try:

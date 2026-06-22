@@ -44,10 +44,11 @@ class DocumentStore:
         for record in records:
             key = str(record.get("key", ""))
             title = str(record.get("title") or key.rsplit("/", 1)[-1] or "Untitled")
+            uri = str(record.get("uri") or f"s3://{self.settings.s3_bucket}/{key}")
             output.append(
                 DocumentRecord(
                     title=title,
-                    uri=f"s3://{self.settings.s3_bucket}/{key}",
+                    uri=uri,
                     key=key,
                     content_type=str(record.get("content_type", "")),
                     metadata=dict(record.get("metadata", {})),
@@ -62,6 +63,8 @@ class DocumentStore:
         rows: list[dict[str, Any]] = []
         for document in self.list_documents():
             if not document.key.lower().endswith(".csv"):
+                continue
+            if document.key.startswith("postgres://") or str(document.metadata.get("asset_source")) == "postgres_uploaded_lookup":
                 continue
             text = self.read_text(document.key)
             reader = csv.DictReader(io.StringIO(text))
@@ -92,6 +95,35 @@ class DocumentStore:
             Key=key,
             Body=data,
             ContentType=content_type,
+        )
+        self.invalidate_manifest_cache()
+
+    @retry_transient
+    def upsert_manifest_record(self, record: dict[str, Any]) -> None:
+        manifest = self._load_manifest()
+        records = [
+            dict(item)
+            for item in manifest.get("documents", [])
+            if isinstance(item, dict) and item.get("key") != record.get("key")
+        ]
+        records.append(dict(record))
+        manifest["documents"] = records
+        manifest["total_chunks"] = sum(int(item.get("chunk_count") or 0) for item in records)
+        self.s3_client.put_object(
+            Bucket=self.settings.s3_bucket,
+            Key=self.settings.s3_manifest_key,
+            Body=json.dumps(manifest, indent=2).encode("utf-8"),
+            ContentType="application/json",
+        )
+        self.invalidate_manifest_cache()
+
+    @retry_transient
+    def replace_manifest(self, manifest: dict[str, Any]) -> None:
+        self.s3_client.put_object(
+            Bucket=self.settings.s3_bucket,
+            Key=self.settings.s3_manifest_key,
+            Body=json.dumps(manifest, indent=2).encode("utf-8"),
+            ContentType="application/json",
         )
         self.invalidate_manifest_cache()
 
@@ -136,10 +168,11 @@ class LocalDocumentStore(DocumentStore):
         for record in records:
             key = str(record.get("key", ""))
             title = str(record.get("title") or key.rsplit("/", 1)[-1] or "Untitled")
+            uri = str(record.get("uri") or f"local://{key}")
             output.append(
                 DocumentRecord(
                     title=title,
-                    uri=f"local://{key}",
+                    uri=uri,
                     key=key,
                     content_type=str(record.get("content_type", "")),
                     metadata=dict(record.get("metadata", {})),
@@ -156,6 +189,27 @@ class LocalDocumentStore(DocumentStore):
         path = self._path_for_key(key)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(data)
+        self.invalidate_manifest_cache()
+
+    def upsert_manifest_record(self, record: dict[str, Any]) -> None:
+        manifest = self._load_manifest()
+        records = [
+            dict(item)
+            for item in manifest.get("documents", [])
+            if isinstance(item, dict) and item.get("key") != record.get("key")
+        ]
+        records.append(dict(record))
+        manifest["documents"] = records
+        manifest["total_chunks"] = sum(int(item.get("chunk_count") or 0) for item in records)
+        path = self._path_for_key(self.settings.s3_manifest_key)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        self.invalidate_manifest_cache()
+
+    def replace_manifest(self, manifest: dict[str, Any]) -> None:
+        path = self._path_for_key(self.settings.s3_manifest_key)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
         self.invalidate_manifest_cache()
 
     def _load_manifest(self) -> dict[str, Any]:

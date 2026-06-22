@@ -1,4 +1,5 @@
 import io
+import json
 import unittest
 from dataclasses import replace
 
@@ -32,17 +33,16 @@ class FakeS3Client:
     def __init__(self):
         self.get_calls = 0
         self.put_calls = 0
+        self.manifest = {"documents": [{"title": "Policy", "key": "raw/policy.md"}]}
 
     def get_object(self, Bucket, Key):
         self.get_calls += 1
-        return {
-            "Body": io.BytesIO(
-                b'{"documents": [{"title": "Policy", "key": "raw/policy.md"}]}'
-            )
-        }
+        return {"Body": io.BytesIO(json.dumps(self.manifest).encode("utf-8"))}
 
     def put_object(self, Bucket, Key, Body, ContentType):
         self.put_calls += 1
+        if Key == "manifest.json":
+            self.manifest = json.loads(Body.decode("utf-8"))
 
 
 class DocumentStoreCacheTests(unittest.TestCase):
@@ -59,6 +59,28 @@ class DocumentStoreCacheTests(unittest.TestCase):
 
         self.assertEqual(store._s3_client.put_calls, 1)
         self.assertEqual(store._s3_client.get_calls, 2)
+
+    def test_upsert_manifest_record_preserves_postgres_uri(self):
+        store = DocumentStore(settings(document_manifest_cache_ttl_seconds=300))
+        store._s3_client = FakeS3Client()
+
+        store.upsert_manifest_record(
+            {
+                "key": "postgres://uploaded_lookup_rows/doctor_rota.csv",
+                "title": "doctor_rota.csv",
+                "uri": "postgres://uploaded_lookup_rows/doctor_rota.csv",
+                "content_type": "text/csv",
+                "metadata": {"asset_source": "postgres_uploaded_lookup"},
+                "chunk_count": 0,
+                "ingestion_status": "metadata_only",
+            }
+        )
+
+        records = store.list_documents()
+
+        self.assertEqual(records[-1].uri, "postgres://uploaded_lookup_rows/doctor_rota.csv")
+        self.assertEqual(records[-1].ingestion_status, "metadata_only")
+        self.assertEqual(records[-1].metadata["asset_source"], "postgres_uploaded_lookup")
 
 
 if __name__ == "__main__":

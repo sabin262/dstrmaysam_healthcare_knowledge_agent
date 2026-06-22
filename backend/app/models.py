@@ -92,6 +92,18 @@ class AdminPasswordResetRequest(BaseModel):
     temporary_password: str = Field(min_length=1)
 
 
+class AdminDeleteIndexesRequest(BaseModel):
+    admin_password: str = Field(min_length=1)
+
+
+class AdminDeleteIndexesResponse(BaseModel):
+    deleted_chunks: int = 0
+    manifest_cleared: bool = False
+    backend: str
+    raw_documents_preserved: bool = True
+    deterministic_lookup_preserved: bool = True
+
+
 class AdminDocumentUploadResponse(BaseModel):
     key: str
     uri: str

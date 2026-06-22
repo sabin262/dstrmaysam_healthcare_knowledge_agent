@@ -100,6 +100,11 @@ def build_healthcare_agent_tools(
             or any(marker in record.key.lower() for marker in ["calendar", "rota", "on-call", "oncall"])
         ]
         for record in records:
+            if (
+                record.key.startswith("postgres://")
+                or str(record.metadata.get("asset_source")) == "postgres_uploaded_lookup"
+            ):
+                continue
             if not record.key.lower().endswith(".csv"):
                 continue
             try:

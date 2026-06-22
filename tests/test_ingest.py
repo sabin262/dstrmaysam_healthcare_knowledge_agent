@@ -226,6 +226,42 @@ class IncrementalIngestionTests(unittest.TestCase):
         self.assertEqual(result["documents"][0]["key"], "raw/privacy_policy.md")
         self.assertEqual(opensearch.indexes[0]["body"]["key"], "raw/privacy_policy.md")
 
+    def test_metadata_only_csv_manifest_records_are_preserved(self):
+        manifest = {
+            "opensearch_index": "idx",
+            "documents": [
+                {
+                    "key": "postgres://uploaded_lookup_rows/doctor_rota.csv",
+                    "title": "doctor_rota.csv",
+                    "uri": "postgres://uploaded_lookup_rows/doctor_rota.csv",
+                    "content_type": "text/csv",
+                    "checksum": "old",
+                    "metadata": {
+                        "domain": "deterministic_lookup",
+                        "document_type": "csv_table",
+                        "asset_source": "postgres_uploaded_lookup",
+                    },
+                    "chunk_count": 0,
+                    "ingestion_status": "metadata_only",
+                }
+            ],
+        }
+        opensearch = FakeOpenSearch()
+        job = make_job(
+            FakeS3({"raw/privacy_policy.md": b"# Patient privacy policy"}, manifest),
+            opensearch,
+        )
+
+        result = job.run()
+
+        self.assertEqual(result["indexed_documents"], 1)
+        self.assertEqual(result["deleted_documents"], 0)
+        self.assertEqual(result["deleted_chunks"], 0)
+        self.assertEqual(result["documents"][0]["key"], "postgres://uploaded_lookup_rows/doctor_rota.csv")
+        self.assertEqual(result["documents"][0]["ingestion_status"], "metadata_only")
+        self.assertEqual(result["documents"][1]["key"], "raw/privacy_policy.md")
+        self.assertEqual(result["total_chunks"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()
