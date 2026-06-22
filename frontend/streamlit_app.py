@@ -1,13 +1,102 @@
+import json
 import os
 from typing import Any
 
 import requests
 import streamlit as st
+import streamlit.components.v1 as components
 
 
 BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000").rstrip("/")
 KNOWN_ROLES = ["admin", "staff", "doctor", "nurse", "pharmacy", "clinical_governance", "manager"]
 MIN_PASSWORD_LENGTH = 8
+AUTH_COOKIE_NAME = "hka_access_token"
+AUTH_COOKIE_DEFAULT_MAX_AGE_SECONDS = 3600
+
+
+def _set_auth_cookie(token: str, max_age_seconds: int) -> None:
+    components.html(
+        f"""
+        <script>
+        const cookieName = {json.dumps(AUTH_COOKIE_NAME)};
+        const token = {json.dumps(token)};
+        const maxAge = {int(max_age_seconds)};
+        document.cookie = cookieName + "=" + encodeURIComponent(token)
+            + "; Max-Age=" + maxAge + "; Path=/; SameSite=Lax";
+        </script>
+        """,
+        height=0,
+    )
+
+
+def _clear_auth_cookie(*, reload_parent: bool = False) -> None:
+    reload_script = "setTimeout(() => window.parent.location.reload(), 50);" if reload_parent else ""
+    components.html(
+        f"""
+        <script>
+        const cookieName = {json.dumps(AUTH_COOKIE_NAME)};
+        document.cookie = cookieName + "=; Max-Age=0; Path=/; SameSite=Lax";
+        {reload_script}
+        </script>
+        """,
+        height=0,
+    )
+
+
+def _read_auth_cookie() -> str | None:
+    try:
+        value = st.context.cookies.get(AUTH_COOKIE_NAME)
+        return str(value) if value else None
+    except Exception:
+        return None
+
+
+def sync_auth_cookie() -> None:
+    token = st.session_state.get("access_token")
+    if not token:
+        return
+    max_age = int(st.session_state.get("access_token_expires_in") or AUTH_COOKIE_DEFAULT_MAX_AGE_SECONDS)
+    _set_auth_cookie(str(token), max_age)
+
+
+def store_user_context(data: dict[str, Any]) -> None:
+    st.session_state.username = data.get("username")
+    st.session_state.roles = data.get("roles", [])
+    st.session_state.departments = data.get("departments", [])
+    st.session_state.password_change_required = data.get("password_change_required", False)
+
+
+def restore_login_from_cookie() -> None:
+    if st.session_state.get("access_token"):
+        return
+    token = _read_auth_cookie()
+    if not token:
+        return
+    st.session_state.access_token = token
+    try:
+        data = get_json("/auth/me")
+        if isinstance(data, dict):
+            store_user_context(data)
+        st.session_state.setdefault("session_id", None)
+        st.session_state.setdefault("messages", [])
+        warm_document_manifest_cache()
+    except Exception:
+        for key in (
+            "access_token",
+            "access_token_expires_in",
+            "username",
+            "roles",
+            "departments",
+            "password_change_required",
+        ):
+            st.session_state.pop(key, None)
+        _clear_auth_cookie()
+
+
+def sign_out() -> None:
+    _clear_auth_cookie(reload_parent=True)
+    st.session_state.clear()
+    st.stop()
 
 
 def api_headers() -> dict[str, str]:
@@ -82,10 +171,8 @@ def warm_document_manifest_cache() -> None:
 
 def store_login(data: dict[str, Any]) -> None:
     st.session_state.access_token = data["access_token"]
-    st.session_state.username = data.get("username")
-    st.session_state.roles = data.get("roles", [])
-    st.session_state.departments = data.get("departments", [])
-    st.session_state.password_change_required = data.get("password_change_required", False)
+    st.session_state.access_token_expires_in = data.get("expires_in", AUTH_COOKIE_DEFAULT_MAX_AGE_SECONDS)
+    store_user_context(data)
 
 
 def parse_departments(raw: str) -> list[str]:
@@ -235,14 +322,16 @@ def render_admin_dashboard() -> None:
 
     summary = payload.get("summary") or {}
     queries = payload.get("queries") or []
-    metric_columns = st.columns(7)
+    ragas_summary = summary.get("ragas") or {}
+    metric_columns = st.columns(8)
     metric_columns[0].metric("Queries", summary.get("total_queries", 0))
     metric_columns[1].metric("Users", summary.get("unique_users", 0))
     metric_columns[2].metric("Avg latency", f"{summary.get('avg_latency_ms', 0)} ms")
     metric_columns[3].metric("Max latency", f"{summary.get('max_latency_ms', 0)} ms")
     metric_columns[4].metric("Avg tokens", summary.get("avg_total_tokens", 0))
     metric_columns[5].metric("Avg sources", f"{float(summary.get('avg_sources_per_query', 0)):.1f}")
-    metric_columns[6].metric("Guardrails", summary.get("guardrail_trigger_count", 0))
+    metric_columns[6].metric("Avg faithfulness", format_score(ragas_summary.get("ragas_faithfulness")))
+    metric_columns[7].metric("Guardrails", summary.get("guardrail_trigger_count", 0))
 
     st.divider()
     chart_columns = st.columns(3)
@@ -283,6 +372,11 @@ def render_admin_dashboard() -> None:
                 "Sources": item.get("source_count", 0),
                 "Tokens": item.get("total_tokens", 0),
                 "Latency ms": item.get("latency_ms", 0),
+                "Faithfulness": format_score((item.get("ragas") or {}).get("ragas_faithfulness")),
+                "Relevancy": format_score((item.get("ragas") or {}).get("ragas_answer_relevancy")),
+                "Context precision": format_score((item.get("ragas") or {}).get("ragas_context_precision")),
+                "Context recall": format_score((item.get("ragas") or {}).get("ragas_context_recall")),
+                "RAGAS status": item.get("ragas_status") or "",
                 "Trace": item.get("trace_id", ""),
                 "Guardrail": item.get("guardrail_applied", False),
             }
@@ -313,6 +407,10 @@ def render_admin_dashboard() -> None:
                     "tools_used": item.get("tools_used", []),
                     "source_document_keys": item.get("source_document_keys", []),
                     "agent_mode": item.get("agent_mode"),
+                    "ragas": item.get("ragas", {}),
+                    "ragas_status": item.get("ragas_status"),
+                    "ragas_provider": item.get("ragas_provider"),
+                    "langfuse_ragas_published": item.get("langfuse_ragas_published"),
                     "guardrail_applied": item.get("guardrail_applied"),
                     "guardrail_reason": item.get("guardrail_reason"),
                     "safety": item.get("safety", {}),
@@ -510,45 +608,20 @@ def render_admin_documents() -> None:
                 st.error(f"Ingestion failed: {exc}")
 
 
-def render_response_details(metadata: dict[str, Any]) -> None:
-    sources = metadata.get("sources") or []
-    if sources:
-        source_rows = []
-        for source in sources:
-            source_metadata = source.get("metadata") or {}
-            source_rows.append(
-                {
-                    "Title": source.get("title", ""),
-                    "URI": source.get("uri", ""),
-                    "Score": source.get("score"),
-                    "Strategy": source_metadata.get("_retrieval_strategy", ""),
-                    "Chunk": source_metadata.get("_chunk_index", ""),
-                    "Category": source_metadata.get("domain", ""),
-                    "Snippet": source.get("snippet", ""),
-                }
-            )
-        st.dataframe(source_rows, hide_index=True, use_container_width=True)
-    st.json(metadata)
+def format_score(value: Any) -> str:
+    try:
+        if value is None:
+            return "-"
+        return f"{float(value):.2f}"
+    except Exception:
+        return "-"
 
 
 def submit_chat_query(query: str) -> None:
     payload = {"query": query, "session_id": st.session_state.get("session_id")}
     data = post_json("/chat", payload)
     st.session_state.session_id = data["session_id"]
-    metadata = {
-        "sources": data.get("sources", []),
-        "tools_used": data.get("tools_used", []),
-        "input_tokens": data.get("input_tokens"),
-        "output_tokens": data.get("output_tokens"),
-        "latency_ms": data.get("latency_ms"),
-        "trace_id": data.get("trace_id"),
-        "safety": data.get("safety", {}),
-        "audit_event": data.get("audit_event", {}),
-        "performance": data.get("performance", {}),
-    }
-    st.session_state.messages.append(
-        {"role": "assistant", "content": data["answer"], "metadata": metadata}
-    )
+    st.session_state.messages.append({"role": "assistant", "content": data["answer"]})
 
 
 def render_chat_messages(show_thinking: bool = False) -> None:
@@ -560,10 +633,6 @@ def render_chat_messages(show_thinking: bool = False) -> None:
             role = "assistant" if message.get("role") == "assistant" else "user"
             with st.chat_message(role):
                 st.markdown(message.get("content", ""))
-                metadata = message.get("metadata") or {}
-                if role == "assistant" and metadata:
-                    with st.expander("Response details"):
-                        render_response_details(metadata)
         if show_thinking:
             with st.chat_message("assistant"):
                 with st.spinner("Thinking with knowledge context..."):
@@ -600,6 +669,8 @@ def render_chat_page() -> None:
 
 st.set_page_config(page_title="Dstrmaysam Healthcare Knowledge Agent", page_icon=None, layout="wide")
 st.title("Dstrmaysam Healthcare Knowledge Agent")
+restore_login_from_cookie()
+sync_auth_cookie()
 
 if "access_token" not in st.session_state:
     with st.form("login"):
@@ -623,8 +694,7 @@ if st.session_state.get("password_change_required"):
     with st.sidebar:
         st.caption(f"Signed in as {st.session_state.get('username') or 'user'}")
         if st.button("Sign out"):
-            st.session_state.clear()
-            st.rerun()
+            sign_out()
     render_password_change()
     st.stop()
 
@@ -635,8 +705,7 @@ with st.sidebar:
         st.session_state.messages = []
         st.rerun()
     if st.button("Sign out"):
-        st.session_state.clear()
-        st.rerun()
+        sign_out()
 
     try:
         sessions = get_json("/chat/sessions")

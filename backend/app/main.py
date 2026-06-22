@@ -19,7 +19,7 @@ from .auth import (
 from .config import AppSettings
 from .deterministic_lookup import DeterministicLookupService
 from .healthcare import HealthcareUserContext
-from .history import InMemoryChatHistoryRepository, create_chat_history_repository
+from .history import PostgresChatHistoryRepository, create_chat_history_repository
 from .ingest import IngestionJob
 from .local_chroma import LocalChromaIngestionJob, LocalChromaRetrievalService
 from .models import (
@@ -29,6 +29,7 @@ from .models import (
     AdminUserCreateRequest,
     AdminUserSummary,
     AdminUserUpdateRequest,
+    AuthUserResponse,
     ChangePasswordRequest,
     ChatRequest,
     ChatResponse,
@@ -69,7 +70,7 @@ def get_auth_service() -> AuthService:
 def get_history_repository():
     settings = get_settings()
     if settings.use_local_resources():
-        return InMemoryChatHistoryRepository()
+        return PostgresChatHistoryRepository(settings)
     return create_chat_history_repository(settings)
 
 
@@ -148,6 +149,15 @@ def _admin_user_response(user) -> AdminUserSummary:
         username=user.username,
         roles=user.roles,
         departments=user.departments,
+        password_change_required=user.password_change_required,
+    )
+
+
+def _auth_user_response(user: HealthcareUserContext) -> AuthUserResponse:
+    return AuthUserResponse(
+        username=user.user_id,
+        roles=list(user.roles),
+        departments=list(user.departments),
         password_change_required=user.password_change_required,
     )
 
@@ -236,6 +246,11 @@ def login(request: LoginRequest) -> LoginResponse:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+
+
+@app.get("/auth/me", response_model=AuthUserResponse)
+def auth_me(user: HealthcareUserContext = Depends(current_user_context)) -> AuthUserResponse:
+    return _auth_user_response(user)
 
 
 @app.post("/auth/change-password", response_model=LoginResponse)
@@ -375,6 +390,12 @@ def admin_dashboard(
     input_tokens: list[int] = []
     output_tokens: list[int] = []
     total_tokens: list[int] = []
+    ragas_values: dict[str, list[float]] = {
+        "ragas_faithfulness": [],
+        "ragas_answer_relevancy": [],
+        "ragas_context_precision": [],
+        "ragas_context_recall": [],
+    }
     guardrail_count = 0
     total_sources = 0
 
@@ -389,6 +410,7 @@ def admin_dashboard(
         total_token_count = input_token_count + output_token_count
         model = str(metadata.get("model") or get_settings().azure_openai_deployment or "unknown")
         guardrail_applied = bool(metadata.get("guardrail_applied") or performance.get("response_guardrail_applied"))
+        ragas_scores = metadata.get("ragas") if isinstance(metadata.get("ragas"), dict) else {}
 
         user_counts[interaction.user_id] = user_counts.get(interaction.user_id, 0) + 1
         model_counts[model] = model_counts.get(model, 0) + 1
@@ -403,6 +425,13 @@ def admin_dashboard(
             total_tokens.append(total_token_count)
         if guardrail_applied:
             guardrail_count += 1
+        for score_name in ragas_values:
+            try:
+                value = ragas_scores.get(score_name)
+                if value is not None:
+                    ragas_values[score_name].append(float(value))
+            except Exception:
+                pass
         for tool in tools_used:
             tool_counts[tool] = tool_counts.get(tool, 0) + 1
 
@@ -423,6 +452,12 @@ def admin_dashboard(
                 "output_tokens": output_token_count,
                 "total_tokens": total_token_count,
                 "agent_mode": performance.get("agent_mode"),
+                "ragas": ragas_scores,
+                "ragas_status": metadata.get("ragas_status"),
+                "ragas_provider": metadata.get("ragas_provider"),
+                "ragas_error": metadata.get("ragas_error"),
+                "langfuse_ragas_published": metadata.get("langfuse_ragas_published"),
+                "langfuse_ragas_error": metadata.get("langfuse_ragas_error"),
                 "guardrail_applied": guardrail_applied,
                 "guardrail_reason": metadata.get("guardrail_reason") or performance.get("response_guardrail_reason"),
                 "safety": metadata.get("safety", {}),
@@ -442,6 +477,10 @@ def admin_dashboard(
         "tool_counts": tool_counts,
         "user_counts": user_counts,
         "model_counts": model_counts,
+        "ragas": {
+            score_name: (sum(values) / len(values) if values else None)
+            for score_name, values in ragas_values.items()
+        },
     }
     return {"summary": summary, "queries": rows}
 
