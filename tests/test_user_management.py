@@ -153,6 +153,30 @@ class UserManagementApiTests(unittest.TestCase):
         self.assertEqual(reset_response.status_code, 200)
         self.assertTrue(reset_response.json()["password_change_required"])
 
+    def test_auth_me_returns_current_user_profile(self):
+        response = self.client.get(
+            "/auth/me",
+            headers=self.headers_for("staff", "staffpass1"),
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["username"], "staff")
+        self.assertEqual(response.json()["roles"], ["staff"])
+        self.assertEqual(response.json()["departments"], ["operations"])
+        self.assertFalse(response.json()["password_change_required"])
+
+    def test_auth_me_allows_password_change_required_user_context(self):
+        self.auth.create_user("doctor1", "temporary1", ["doctor"], ["cardiology"])
+
+        response = self.client.get(
+            "/auth/me",
+            headers=self.headers_for("doctor1", "temporary1"),
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["username"], "doctor1")
+        self.assertTrue(response.json()["password_change_required"])
+
     def test_short_temporary_password_returns_domain_error_not_validation_422(self):
         admin_headers = self.headers_for("admin", "adminpass1")
 
@@ -399,6 +423,30 @@ class AdminDocumentApiTests(unittest.TestCase):
                     "model": "gpt-4.1-mini",
                     "sources": [{"uri": "s3://bucket/raw/policy.md"}],
                     "source_document_keys": ["raw/policy.md"],
+                    "catalog_guidance": [
+                        {
+                            "tool": "rag_search",
+                            "query": "What is the leave policy?",
+                            "candidate_keys": ["raw/policy.md"],
+                            "candidate_count": 1,
+                            "catalog_filter_applied": True,
+                            "fallback_to_broad_search": False,
+                            "timing_ms": {
+                                "catalog_ms": 3,
+                                "retrieval_search_ms": 15,
+                                "returned_hits": 1,
+                            },
+                        }
+                    ],
+                    "ragas": {
+                        "ragas_faithfulness": 0.8,
+                        "ragas_answer_relevancy": 0.7,
+                        "ragas_context_precision": 0.6,
+                        "ragas_context_recall": 0.5,
+                    },
+                    "ragas_status": "scored",
+                    "ragas_provider": "ragas",
+                    "langfuse_ragas_published": True,
                     "guardrail_applied": False,
                     "performance": {"agent_mode": "fast_rag"},
                     "safety": {"risk_level": "low"},
@@ -417,11 +465,19 @@ class AdminDocumentApiTests(unittest.TestCase):
         self.assertEqual(payload["summary"]["avg_input_tokens"], 10)
         self.assertEqual(payload["summary"]["avg_output_tokens"], 6)
         self.assertEqual(payload["summary"]["avg_total_tokens"], 16)
+        self.assertEqual(payload["summary"]["ragas"]["ragas_faithfulness"], 0.8)
         self.assertEqual(payload["summary"]["tool_counts"]["rag_search"], 1)
+        self.assertEqual(payload["summary"]["tool_flow_counts"]["document_catalog"], 1)
+        self.assertEqual(payload["summary"]["tool_flow_counts"]["rag_search"], 1)
         self.assertEqual(payload["summary"]["model_counts"]["gpt-4.1-mini"], 1)
         self.assertEqual(payload["queries"][0]["user_id"], "staff")
         self.assertEqual(payload["queries"][0]["trace_id"], "trace-123")
         self.assertEqual(payload["queries"][0]["total_tokens"], 16)
+        self.assertEqual(payload["queries"][0]["tool_flow_summary"], "document_catalog -> rag_search")
+        self.assertEqual(payload["queries"][0]["tool_flow"][0]["tool"], "document_catalog")
+        self.assertEqual(payload["queries"][0]["tool_flow"][0]["helper_for"], "rag_search")
+        self.assertEqual(payload["queries"][0]["ragas"]["ragas_answer_relevancy"], 0.7)
+        self.assertTrue(payload["queries"][0]["langfuse_ragas_published"])
         self.assertEqual(payload["queries"][0]["source_document_keys"], ["raw/policy.md"])
 
     def test_admin_patient_details_uses_postgres_lookup_filters(self):

@@ -20,6 +20,7 @@ from .healthcare import (
 from .healthcare_tools import build_healthcare_agent_tools
 from .history import ChatHistoryRepository, ChatMessage, build_history_context
 from .observability import ObservabilityClient
+from .ragas_scoring import compute_live_ragas_scores
 from .retrieval import RetrievalHit, RetrievalService
 from .secrets import SecretProvider
 from .storage import DocumentStore
@@ -352,6 +353,76 @@ def _source_document_keys(sources: list[dict[str, Any]]) -> list[str]:
     return keys
 
 
+def _tool_flow_from_execution(
+    tools_used: list[str],
+    catalog_guidance: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    flow: list[dict[str, Any]] = []
+    remaining_guidance = list(catalog_guidance)
+    for tool in tools_used:
+        guidance_index = next(
+            (
+                index
+                for index, guidance in enumerate(remaining_guidance)
+                if str(guidance.get("tool") or "") == tool
+            ),
+            None,
+        )
+        if guidance_index is None:
+            flow.append({"tool": tool, "kind": "agent_tool", "selected_by_agent": True})
+            continue
+
+        guidance = remaining_guidance.pop(guidance_index)
+        timing = guidance.get("timing_ms") if isinstance(guidance.get("timing_ms"), dict) else {}
+        flow.append(
+            {
+                "tool": "document_catalog",
+                "kind": "helper_tool",
+                "helper_for": tool,
+                "selected_by_agent": False,
+                "query": guidance.get("query"),
+                "candidate_count": guidance.get("candidate_count", 0),
+                "candidate_keys": guidance.get("candidate_keys", []),
+                "fallback_to_broad_search": guidance.get("fallback_to_broad_search", False),
+                "latency_ms": int(timing.get("catalog_ms", 0)),
+            }
+        )
+        flow.append(
+            {
+                "tool": tool,
+                "kind": "agent_tool",
+                "selected_by_agent": True,
+                "query": guidance.get("query"),
+                "source": "catalog_filtered_retrieval"
+                if guidance.get("catalog_filter_applied")
+                else "broad_retrieval",
+                "candidate_count": guidance.get("candidate_count", 0),
+                "returned_hits": int(timing.get("returned_hits", 0)),
+                "latency_ms": int(timing.get("retrieval_search_ms", 0)),
+            }
+        )
+
+    for guidance in remaining_guidance:
+        tool = str(guidance.get("tool") or "")
+        if not tool:
+            continue
+        timing = guidance.get("timing_ms") if isinstance(guidance.get("timing_ms"), dict) else {}
+        flow.append(
+            {
+                "tool": "document_catalog",
+                "kind": "helper_tool",
+                "helper_for": tool,
+                "selected_by_agent": False,
+                "query": guidance.get("query"),
+                "candidate_count": guidance.get("candidate_count", 0),
+                "candidate_keys": guidance.get("candidate_keys", []),
+                "fallback_to_broad_search": guidance.get("fallback_to_broad_search", False),
+                "latency_ms": int(timing.get("catalog_ms", 0)),
+            }
+        )
+    return flow
+
+
 def _make_system_message(content: str) -> Any:
     try:
         from langchain_core.messages import SystemMessage
@@ -488,6 +559,7 @@ class KnowledgeAgent:
                 sources = graph_result.sources
                 tools_used = graph_result.tools_used
                 catalog_guidance = graph_result.catalog_guidance
+                tool_flow = _tool_flow_from_execution(tools_used, catalog_guidance)
                 performance.update(graph_result.performance)
                 answer = self._apply_llm_response_guardrail(
                     query=safe_query,
@@ -508,7 +580,9 @@ class KnowledgeAgent:
                     "model": self.settings.azure_openai_deployment or "unknown",
                     "prompt_label": self.settings.prompt_label,
                     "tools_used": tools_used,
+                    "tool_flow": tool_flow,
                     "tool_count": len(tools_used),
+                    "tool_flow_count": len(tool_flow),
                     "source_count": len(sources),
                     "source_document_keys": _source_document_keys(sources),
                     "guardrail_applied": bool(performance.get("response_guardrail_applied")),
@@ -534,6 +608,7 @@ class KnowledgeAgent:
                     metadata={
                         "sources": sources,
                         "tools_used": tools_used,
+                        "tool_flow": tool_flow,
                         "input_tokens": input_tokens,
                         "output_tokens": output_tokens,
                         "latency_ms": latency_ms,
@@ -571,6 +646,7 @@ class KnowledgeAgent:
                     output={"answer": answer, "sources": sources},
                     metadata={
                         "tools_used": tools_used,
+                        "tool_flow": tool_flow,
                         "input_tokens": input_tokens,
                         "output_tokens": output_tokens,
                         "latency_ms": latency_ms,
@@ -581,6 +657,14 @@ class KnowledgeAgent:
                         **trace_metadata,
                         "performance": performance,
                     },
+                )
+                self._run_background_ragas_scoring(
+                    question=safe_query,
+                    answer=answer,
+                    sources=sources,
+                    trace_id=trace_id,
+                    user_id=user_id,
+                    session_id=session_id,
                 )
             finally:
                 self.tools = original_tools
@@ -600,6 +684,7 @@ class KnowledgeAgent:
                 "phi_redaction": redaction.findings,
                 "audit_event": audit_event,
                 "catalog_guidance": catalog_guidance,
+                "tool_flow": tool_flow,
                 "llm_error": self._llm_error,
                 **trace_metadata,
                 "performance": performance,
@@ -645,6 +730,72 @@ class KnowledgeAgent:
             self.history.save_message(user_id, session_id, assistant_message)
         except Exception:
             return
+
+    def _run_background_ragas_scoring(
+        self,
+        *,
+        question: str,
+        answer: str,
+        sources: list[dict[str, Any]],
+        trace_id: str,
+        user_id: str,
+        session_id: str,
+    ) -> None:
+        thread = threading.Thread(
+            target=self._score_and_publish_ragas,
+            kwargs={
+                "question": question,
+                "answer": answer,
+                "sources": sources,
+                "trace_id": trace_id,
+                "user_id": user_id,
+                "session_id": session_id,
+            },
+            daemon=True,
+        )
+        thread.start()
+
+    def _score_and_publish_ragas(
+        self,
+        *,
+        question: str,
+        answer: str,
+        sources: list[dict[str, Any]],
+        trace_id: str,
+        user_id: str,
+        session_id: str,
+    ) -> None:
+        result = compute_live_ragas_scores(question=question, answer=answer, sources=sources)
+        scores = {
+            key: float(value)
+            for key, value in (result.get("scores") or {}).items()
+            if value is not None
+        }
+        publish_status = self.observability.publish_scores(
+            trace_id=trace_id,
+            scores=scores,
+            metadata={
+                "user_id": user_id,
+                "session_id": session_id,
+                "provider": result.get("provider"),
+                "status": result.get("status"),
+            },
+        )
+        metadata_update = {
+            "ragas": scores,
+            "ragas_status": result.get("status"),
+            "ragas_provider": result.get("provider"),
+            "ragas_error": result.get("error"),
+            "langfuse_ragas_published": bool(publish_status.get("published")),
+            "langfuse_ragas_error": publish_status.get("error"),
+        }
+        for _ in range(10):
+            try:
+                if self.history.update_message_metadata_by_trace_id(trace_id, metadata_update):
+                    return
+            except Exception:
+                return
+            time.sleep(0.2)
 
     def _apply_llm_response_guardrail(
         self,

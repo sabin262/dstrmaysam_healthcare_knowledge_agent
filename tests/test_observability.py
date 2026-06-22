@@ -39,12 +39,19 @@ class FakeLangfuseClient:
     def __init__(self):
         self.calls = 0
         self.fail = False
+        self.scores = []
 
     def get_prompt(self, *args, **kwargs):
         self.calls += 1
         if self.fail:
             raise RuntimeError("prompt unavailable")
         return FakePrompt()
+
+    def create_score(self, **kwargs):
+        self.scores.append(kwargs)
+
+    def flush(self):
+        pass
 
 
 class ObservabilityCacheTests(unittest.TestCase):
@@ -95,6 +102,26 @@ class ObservabilityCacheTests(unittest.TestCase):
 
         self.assertEqual(version, "v1")
         self.assertEqual(prompt, "cached system prompt")
+
+    def test_publish_scores_creates_langfuse_numeric_scores(self):
+        app_settings = settings()
+        observability = ObservabilityClient(
+            app_settings,
+            StaticSecretProvider(app_settings, {"/test/app": {"session_secret": "secret"}}),
+        )
+        client = FakeLangfuseClient()
+        observability._langfuse_client = client
+
+        status = observability.publish_scores(
+            trace_id="trace-1",
+            scores={"ragas_faithfulness": 0.75},
+            metadata={"provider": "ragas"},
+        )
+
+        self.assertTrue(status["published"])
+        self.assertEqual(client.scores[0]["trace_id"], "trace-1")
+        self.assertEqual(client.scores[0]["name"], "ragas_faithfulness")
+        self.assertEqual(client.scores[0]["value"], 0.75)
 
 
 if __name__ == "__main__":
