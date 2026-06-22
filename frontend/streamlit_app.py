@@ -861,12 +861,7 @@ def render_chat_page() -> None:
             st.error(f"Chat failed: {exc}")
 
 
-st.set_page_config(page_title="Dstrmaysam Healthcare Knowledge Agent", page_icon=None, layout="wide")
-st.title("Dstrmaysam Healthcare Knowledge Agent")
-restore_login_from_cookie()
-sync_auth_cookie()
-
-if "access_token" not in st.session_state:
+def render_login_page() -> None:
     with st.form("login"):
         username = st.text_input("Username")
         password = st.text_input("Password", type="password")
@@ -882,24 +877,19 @@ if "access_token" not in st.session_state:
             st.rerun()
         except Exception as exc:
             st.error(f"Login failed: {exc}")
-    st.stop()
 
-if st.session_state.get("password_change_required"):
-    with st.sidebar:
-        st.caption(f"Signed in as {st.session_state.get('username') or 'user'}")
-        if st.button("Sign out"):
-            sign_out()
-    render_password_change()
-    st.stop()
 
-with st.sidebar:
+def render_common_sidebar() -> None:
     st.caption(f"Signed in as {st.session_state.get('username') or 'user'}")
+    if st.button("Sign out"):
+        sign_out()
+
+
+def render_chat_sidebar() -> None:
     if st.button("New chat"):
         st.session_state.session_id = None
         st.session_state.messages = []
         st.rerun()
-    if st.button("Sign out"):
-        sign_out()
 
     try:
         sessions = get_json("/chat/sessions")
@@ -916,19 +906,87 @@ with st.sidebar:
     except Exception:
         st.caption("Chat history unavailable")
 
-if "admin" in st.session_state.get("roles", []):
-    chat_tab, dashboard_tab, patient_tab, users_tab, documents_tab = st.tabs(
-        ["Chat", "Dashboard", "Patient Details", "Users", "Documents"]
-    )
-    with chat_tab:
-        render_chat_page()
-    with dashboard_tab:
-        render_admin_dashboard()
-    with patient_tab:
-        render_patient_details_dashboard()
-    with users_tab:
-        render_admin_users()
-    with documents_tab:
-        render_admin_documents()
-else:
+
+def render_password_change_page() -> None:
+    with st.sidebar:
+        render_common_sidebar()
+    render_password_change()
+
+
+def render_chat_app_page() -> None:
+    with st.sidebar:
+        render_common_sidebar()
+        st.divider()
+        render_chat_sidebar()
     render_chat_page()
+
+
+def render_dashboard_app_page() -> None:
+    with st.sidebar:
+        render_common_sidebar()
+    render_admin_dashboard()
+
+
+def render_patient_details_app_page() -> None:
+    with st.sidebar:
+        render_common_sidebar()
+    render_patient_details_dashboard()
+
+
+def render_users_app_page() -> None:
+    with st.sidebar:
+        render_common_sidebar()
+    render_admin_users()
+
+
+def render_documents_app_page() -> None:
+    with st.sidebar:
+        render_common_sidebar()
+    render_admin_documents()
+
+
+st.set_page_config(page_title="Dstrmaysam Healthcare Knowledge Agent", page_icon=None, layout="wide")
+st.title("Dstrmaysam Healthcare Knowledge Agent")
+restore_login_from_cookie()
+sync_auth_cookie()
+
+if "access_token" not in st.session_state:
+    pg = st.navigation(
+        [st.Page(render_login_page, title="Sign in", icon=":material/login:", default=True)]
+    )
+elif st.session_state.get("password_change_required"):
+    pg = st.navigation(
+        [
+            st.Page(
+                render_password_change_page,
+                title="Change password",
+                icon=":material/password:",
+                default=True,
+            )
+        ]
+    )
+elif "admin" in st.session_state.get("roles", []):
+    pg = st.navigation(
+        {
+            "Main": [
+                st.Page(render_chat_app_page, title="Chat", icon=":material/chat:", default=True),
+            ],
+            "Admin": [
+                st.Page(render_dashboard_app_page, title="Dashboard", icon=":material/dashboard:"),
+                st.Page(
+                    render_patient_details_app_page,
+                    title="Patient Details",
+                    icon=":material/patient_list:",
+                ),
+                st.Page(render_users_app_page, title="Users", icon=":material/group:"),
+                st.Page(render_documents_app_page, title="Documents", icon=":material/folder:"),
+            ],
+        },
+        position="sidebar",
+    )
+else:
+    pg = st.navigation(
+        [st.Page(render_chat_app_page, title="Chat", icon=":material/chat:", default=True)]
+    )
+
+pg.run()
