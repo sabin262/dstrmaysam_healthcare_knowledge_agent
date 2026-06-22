@@ -38,6 +38,7 @@ class ModelTests(unittest.TestCase):
         )
 
         self.assertEqual(response.performance, {})
+        self.assertEqual(response.latency_breakdown, {})
 
 
 if __name__ == "__main__":

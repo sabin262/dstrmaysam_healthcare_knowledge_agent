@@ -225,6 +225,15 @@ class AgentContractTests(unittest.TestCase):
         self.assertIn("audit_event", result.metadata)
         self.assertIn("performance", result.metadata)
         self.assertIn("history_load_ms", result.metadata["performance"])
+        self.assertIn("latency_breakdown", result.metadata)
+        self.assertEqual(result.metadata["latency_breakdown"]["total_ms"], result.latency_ms)
+        self.assertIn("top_level", result.metadata["latency_breakdown"])
+        self.assertIn("agent_detail", result.metadata["latency_breakdown"])
+        self.assertIn("sections", result.metadata["latency_breakdown"])
+        self.assertIn("raw_timing_metrics", result.metadata["latency_breakdown"])
+        self.assertIn("history", result.metadata["latency_breakdown"]["sections"])
+        self.assertIn("llm", result.metadata["latency_breakdown"]["sections"])
+        self.assertIn("retrieval_and_catalog", result.metadata["latency_breakdown"]["sections"])
         self.assertEqual(len(agent.history.load_messages("user", "session")), 2)
 
     def test_offline_fallback_includes_azure_openai_diagnostic(self):
@@ -243,6 +252,26 @@ class AgentContractTests(unittest.TestCase):
         self.assertEqual(result.answer, "Direct answer")
         self.assertEqual(result.tools_used, [])
         self.assertEqual(result.sources, [])
+        self.assertTrue(result.metadata["performance"]["llm_cache_hit"])
+        self.assertFalse(result.metadata["performance"]["llm_setup_cold_start"])
+        self.assertTrue(result.metadata["latency_breakdown"]["sections"]["llm"]["llm_cache_hit"])
+
+    def test_warmup_uses_cached_llm_and_primes_retrieval(self):
+        agent = make_agent(
+            FakeLLM([fake_ai_message("OK")]),
+            app_settings=settings(chat_warmup_llm_call_enabled=True),
+        )
+
+        status = agent.warm_up()
+
+        self.assertEqual(status["status"], "ok")
+        self.assertTrue(status["llm_available"])
+        self.assertTrue(status["llm_cache_hit"])
+        self.assertTrue(status["fast_llm_available"])
+        self.assertTrue(status["fast_llm_cache_hit"])
+        self.assertIn("llm_warmup_call_ms", status)
+        self.assertEqual(status["document_count"], 3)
+        self.assertTrue(agent.warmup_status()["total_ms"] >= 0)
 
     def test_fake_llm_records_one_selected_tool(self):
         fake_llm = FakeLLM(
