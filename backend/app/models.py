@@ -56,6 +56,7 @@ class ChatResponse(BaseModel):
     safety: dict[str, Any] = Field(default_factory=dict)
     audit_event: dict[str, Any] = Field(default_factory=dict)
     performance: dict[str, Any] = Field(default_factory=dict)
+    latency_breakdown: dict[str, Any] = Field(default_factory=dict)
 
 
 class ChatSessionSummary(BaseModel):

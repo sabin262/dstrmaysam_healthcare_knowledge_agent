@@ -189,6 +189,160 @@ def _add_tool_timing(performance: dict[str, Any], guidance: list[dict[str, Any]]
             _add_timing(performance, key, int(timing.get(key, 0)))
 
 
+def _metric_ms(performance: dict[str, Any], key: str) -> int:
+    try:
+        return int(performance.get(key) or 0)
+    except Exception:
+        return 0
+
+
+def _sum_metrics_ms(performance: dict[str, Any], keys: tuple[str, ...]) -> int:
+    return sum(_metric_ms(performance, key) for key in keys)
+
+
+def _tool_timing_totals(tool_timings: list[dict[str, Any]]) -> dict[str, int]:
+    totals: dict[str, int] = {
+        "tool_count": len(tool_timings),
+        "catalog_ms": 0,
+        "retrieval_search_ms": 0,
+        "embedding_ms": 0,
+        "opensearch_ms": 0,
+        "neighbor_ms": 0,
+        "access_filter_ms": 0,
+        "total_ms": 0,
+        "vector_hits": 0,
+        "keyword_hits": 0,
+        "neighbor_hits": 0,
+        "returned_hits": 0,
+    }
+    for item in tool_timings:
+        for key in totals:
+            if key == "tool_count":
+                continue
+            try:
+                totals[key] += int(item.get(key) or 0)
+            except Exception:
+                pass
+    return totals
+
+
+def _raw_timing_metrics(performance: dict[str, Any]) -> dict[str, int]:
+    timings: dict[str, int] = {}
+    for key, value in performance.items():
+        if key == "latency_breakdown":
+            continue
+        if key.endswith("_ms") or key == "total_ms":
+            try:
+                timings[key] = int(value or 0)
+            except Exception:
+                pass
+    return dict(sorted(timings.items()))
+
+
+def _latency_breakdown(performance: dict[str, Any], total_ms: int) -> dict[str, Any]:
+    tool_timings = [dict(item) for item in performance.get("tool_timings") or [] if isinstance(item, dict)]
+    tool_totals = _tool_timing_totals(tool_timings)
+    trace_setup_ms = _sum_metrics_ms(
+        performance,
+        ("langfuse_trace_create_ms", "langfuse_trace_enter_ms"),
+    )
+    top_level = {
+        "history_load_ms": _metric_ms(performance, "history_load_ms"),
+        "trace_setup_ms": trace_setup_ms,
+        "prompt_load_ms": _metric_ms(performance, "langfuse_prompt_ms"),
+        "initial_safety_ms": _metric_ms(performance, "initial_safety_ms"),
+        "agent_execution_ms": _metric_ms(performance, "agent_execution_ms"),
+        "response_guardrail_ms": _metric_ms(performance, "response_guardrail_llm_ms"),
+        "final_safety_ms": _metric_ms(performance, "final_safety_ms"),
+        "history_save_ms": _metric_ms(performance, "history_save_ms"),
+    }
+    measured_top_level_ms = sum(top_level.values())
+    top_level["unattributed_ms"] = max(0, int(total_ms) - measured_top_level_ms)
+
+    agent_detail = {
+        "llm_setup_ms": _metric_ms(performance, "llm_setup_ms"),
+        "fast_llm_setup_ms": _metric_ms(performance, "fast_llm_setup_ms"),
+        "langfuse_callbacks_ms": _metric_ms(performance, "langfuse_callbacks_ms"),
+        "llm_tool_choice_ms": _metric_ms(performance, "llm_tool_choice_ms"),
+        "llm_final_ms": _metric_ms(performance, "llm_final_ms"),
+        "llm_direct_answer_ms": _metric_ms(performance, "llm_direct_answer_ms"),
+        "catalog_ms": _metric_ms(performance, "catalog_ms"),
+        "retrieval_search_ms": _metric_ms(performance, "retrieval_search_ms"),
+        "embedding_ms": _metric_ms(performance, "embedding_ms"),
+        "opensearch_ms": _metric_ms(performance, "opensearch_ms"),
+        "neighbor_ms": _metric_ms(performance, "neighbor_ms"),
+        "access_filter_ms": _metric_ms(performance, "access_filter_ms"),
+    }
+    agent_detail["llm_total_ms"] = _sum_metrics_ms(
+        performance,
+        ("llm_tool_choice_ms", "llm_final_ms", "llm_direct_answer_ms"),
+    )
+
+    sections = {
+        "history": {
+            "load_ms": _metric_ms(performance, "history_load_ms"),
+            "save_ms": _metric_ms(performance, "history_save_ms"),
+            "save_background": bool(performance.get("history_save_background")),
+        },
+        "observability": {
+            "langfuse_trace_create_ms": _metric_ms(performance, "langfuse_trace_create_ms"),
+            "langfuse_trace_enter_ms": _metric_ms(performance, "langfuse_trace_enter_ms"),
+            "trace_setup_ms": trace_setup_ms,
+            "langfuse_prompt_ms": _metric_ms(performance, "langfuse_prompt_ms"),
+            "langfuse_callbacks_ms": _metric_ms(performance, "langfuse_callbacks_ms"),
+        },
+        "safety_and_guardrail": {
+            "initial_safety_ms": _metric_ms(performance, "initial_safety_ms"),
+            "response_guardrail_llm_ms": _metric_ms(performance, "response_guardrail_llm_ms"),
+            "response_guardrail_applied": bool(performance.get("response_guardrail_applied")),
+            "response_guardrail_changed": bool(performance.get("response_guardrail_changed")),
+            "response_guardrail_reason": str(performance.get("response_guardrail_reason") or ""),
+            "final_safety_ms": _metric_ms(performance, "final_safety_ms"),
+        },
+        "agent_orchestration": {
+            "agent_execution_ms": _metric_ms(performance, "agent_execution_ms"),
+            "agent_mode": str(performance.get("agent_mode") or ""),
+            "planned_tools": list(performance.get("planned_tools") or []),
+            "llm_call_count": int(performance.get("llm_call_count") or 0),
+        },
+        "llm": {
+            "llm_setup_ms": _metric_ms(performance, "llm_setup_ms"),
+            "llm_cache_hit": bool(performance.get("llm_cache_hit")),
+            "llm_setup_cold_start": bool(performance.get("llm_setup_cold_start")),
+            "fast_llm_setup_ms": _metric_ms(performance, "fast_llm_setup_ms"),
+            "fast_llm_cache_hit": bool(performance.get("fast_llm_cache_hit")),
+            "fast_llm_setup_cold_start": bool(performance.get("fast_llm_setup_cold_start")),
+            "llm_tool_choice_ms": _metric_ms(performance, "llm_tool_choice_ms"),
+            "llm_final_ms": _metric_ms(performance, "llm_final_ms"),
+            "llm_direct_answer_ms": _metric_ms(performance, "llm_direct_answer_ms"),
+            "llm_total_ms": agent_detail["llm_total_ms"],
+        },
+        "retrieval_and_catalog": {
+            "catalog_ms": _metric_ms(performance, "catalog_ms"),
+            "retrieval_search_ms": _metric_ms(performance, "retrieval_search_ms"),
+            "embedding_ms": _metric_ms(performance, "embedding_ms"),
+            "opensearch_ms": _metric_ms(performance, "opensearch_ms"),
+            "neighbor_ms": _metric_ms(performance, "neighbor_ms"),
+            "access_filter_ms": _metric_ms(performance, "access_filter_ms"),
+            "tool_total_ms": tool_totals["total_ms"],
+            "vector_hits": tool_totals["vector_hits"],
+            "keyword_hits": tool_totals["keyword_hits"],
+            "neighbor_hits": tool_totals["neighbor_hits"],
+            "returned_hits": tool_totals["returned_hits"],
+        },
+    }
+
+    return {
+        "total_ms": int(total_ms),
+        "top_level": top_level,
+        "agent_detail": agent_detail,
+        "sections": sections,
+        "raw_timing_metrics": _raw_timing_metrics(performance),
+        "tool_timing_totals": tool_totals,
+        "tool_timings": tool_timings,
+    }
+
+
 def _with_response_style_baseline(prompt: str) -> str:
     prompt = prompt.strip()
     if RESPONSE_STYLE_BASELINE_PROMPT in prompt:
@@ -502,8 +656,89 @@ class KnowledgeAgent:
         self.tools = build_agent_tools(retrieval, documents)
         self._llm: Any | None = None
         self._fast_llm: Any | None = None
+        self._llm_lock = threading.Lock()
         self._llm_error: str | None = None
         self._catalog_candidate_cache: dict[tuple[Any, ...], list[str]] = {}
+        self._warmup_status: dict[str, Any] = {"status": "not_started"}
+
+    def warm_up(self) -> dict[str, Any]:
+        status: dict[str, Any] = {
+            "status": "running",
+            "started_at_unix": time.time(),
+            "llm_call_enabled": bool(self.settings.chat_warmup_llm_call_enabled),
+            "retrieval_enabled": bool(self.settings.chat_warmup_retrieval_enabled),
+        }
+        self._warmup_status = status
+        started = time.perf_counter()
+        try:
+            prompt_started = time.perf_counter()
+            _, prompt_version = self.observability.system_prompt()
+            status["prompt_load_ms"] = _elapsed_ms(prompt_started)
+            status["prompt_version"] = prompt_version
+        except Exception as exc:
+            status["prompt_error"] = f"{type(exc).__name__}: {exc}"
+
+        try:
+            normal_cache_hit = self._llm_cache_hit(fast=False)
+            normal_started = time.perf_counter()
+            normal_llm = self._get_llm(fast=False)
+            status["llm_setup_ms"] = _elapsed_ms(normal_started)
+            status["llm_cache_hit"] = bool(normal_cache_hit and normal_llm is not None)
+            status["llm_available"] = normal_llm is not None
+
+            fast_cache_hit = self._llm_cache_hit(fast=True)
+            fast_started = time.perf_counter()
+            fast_llm = self._get_llm(fast=True)
+            status["fast_llm_setup_ms"] = _elapsed_ms(fast_started)
+            status["fast_llm_cache_hit"] = bool(fast_cache_hit and fast_llm is not None)
+            status["fast_llm_available"] = fast_llm is not None
+
+            if self.settings.chat_warmup_llm_call_enabled:
+                callable_llms = [("llm", normal_llm)]
+                if fast_llm is not None and fast_llm is not normal_llm:
+                    callable_llms.append(("fast_llm", fast_llm))
+                for label, llm in callable_llms:
+                    if llm is None:
+                        continue
+                    call_started = time.perf_counter()
+                    self._invoke_model(
+                        llm,
+                        [
+                            _make_system_message("You are warming up the model client."),
+                            _make_human_message("Reply only: OK"),
+                        ],
+                        None,
+                    )
+                    status[f"{label}_warmup_call_ms"] = _elapsed_ms(call_started)
+        except Exception as exc:
+            status["llm_error"] = f"{type(exc).__name__}: {exc}"
+
+        if self.settings.chat_warmup_retrieval_enabled:
+            try:
+                manifest_started = time.perf_counter()
+                documents = self.documents.list_documents()
+                status["document_manifest_ms"] = _elapsed_ms(manifest_started)
+                status["document_count"] = len(documents)
+            except Exception as exc:
+                status["document_manifest_error"] = f"{type(exc).__name__}: {exc}"
+            try:
+                retrieval_started = time.perf_counter()
+                self.retrieval.search("warmup", top_k=1)
+                status["retrieval_warmup_ms"] = _elapsed_ms(retrieval_started)
+            except Exception as exc:
+                status["retrieval_error"] = f"{type(exc).__name__}: {exc}"
+
+        status["total_ms"] = _elapsed_ms(started)
+        status["finished_at_unix"] = time.time()
+        if any(key.endswith("_error") for key in status):
+            status["status"] = "partial"
+        else:
+            status["status"] = "ok"
+        self._warmup_status = dict(status)
+        return dict(self._warmup_status)
+
+    def warmup_status(self) -> dict[str, Any]:
+        return dict(self._warmup_status)
 
     def answer(
         self,
@@ -639,7 +874,11 @@ class KnowledgeAgent:
                     performance["history_save_background"] = True
                     latency_ms = _elapsed_ms(started)
                     performance["total_ms"] = latency_ms
+                    latency_breakdown = _latency_breakdown(performance, latency_ms)
+                    performance["latency_breakdown"] = latency_breakdown
+                    trace_metadata["latency_breakdown"] = latency_breakdown
                     assistant_message.metadata["latency_ms"] = latency_ms
+                    assistant_message.metadata["latency_breakdown"] = latency_breakdown
                     self._persist_history(user_id, session_id, user_message, assistant_message)
                 else:
                     self._persist_history(user_id, session_id, user_message, assistant_message)
@@ -647,7 +886,23 @@ class KnowledgeAgent:
                     performance["history_save_background"] = False
                     latency_ms = _elapsed_ms(started)
                     performance["total_ms"] = latency_ms
+                    latency_breakdown = _latency_breakdown(performance, latency_ms)
+                    performance["latency_breakdown"] = latency_breakdown
+                    trace_metadata["latency_breakdown"] = latency_breakdown
                     assistant_message.metadata["latency_ms"] = latency_ms
+                    assistant_message.metadata["latency_breakdown"] = latency_breakdown
+                    assistant_message.metadata["performance"] = performance
+                    try:
+                        self.history.update_message_metadata_by_trace_id(
+                            trace_id,
+                            {
+                                "latency_ms": latency_ms,
+                                "latency_breakdown": latency_breakdown,
+                                "performance": performance,
+                            },
+                        )
+                    except Exception:
+                        pass
                 self._update_trace_metadata(
                     trace,
                     output={"answer": answer, "sources": sources},
@@ -1068,8 +1323,11 @@ class KnowledgeAgent:
             initial_safety=initial_safety,
         )
         llm_setup_started = time.perf_counter()
+        llm_cache_hit = self._llm_cache_hit(fast=False)
         llm = self._get_llm()
         performance["llm_setup_ms"] = _elapsed_ms(llm_setup_started)
+        performance["llm_cache_hit"] = bool(llm_cache_hit and llm is not None)
+        performance["llm_setup_cold_start"] = bool(not llm_cache_hit and llm is not None)
         if llm is None:
             result = self._offline_graph_answer(query=query, user_context=user_context)
             result.performance.update(performance)
@@ -1083,8 +1341,14 @@ class KnowledgeAgent:
             agent_started = time.perf_counter()
             fast_planned_tools = self._fast_planned_tools(query)
             if fast_planned_tools:
+                fast_setup_started = time.perf_counter()
+                fast_cache_hit = self._llm_cache_hit(fast=True)
+                fast_llm = self._get_llm(fast=True)
+                performance["fast_llm_setup_ms"] = _elapsed_ms(fast_setup_started)
+                performance["fast_llm_cache_hit"] = bool(fast_cache_hit and fast_llm is not None)
+                performance["fast_llm_setup_cold_start"] = bool(not fast_cache_hit and fast_llm is not None)
                 result = self._call_fast_planned_agent(
-                    llm=self._get_llm(fast=True) or llm,
+                    llm=fast_llm or llm,
                     system_prompt=system_prompt,
                     user_prompt=user_prompt,
                     original_query=query,
@@ -1094,8 +1358,14 @@ class KnowledgeAgent:
                 )
                 result.performance["agent_mode"] = "fast_planned"
             elif self._should_use_fast_rag(query):
+                fast_setup_started = time.perf_counter()
+                fast_cache_hit = self._llm_cache_hit(fast=True)
+                fast_llm = self._get_llm(fast=True)
+                performance["fast_llm_setup_ms"] = _elapsed_ms(fast_setup_started)
+                performance["fast_llm_cache_hit"] = bool(fast_cache_hit and fast_llm is not None)
+                performance["fast_llm_setup_cold_start"] = bool(not fast_cache_hit and fast_llm is not None)
                 result = self._call_fast_rag_agent(
-                    llm=self._get_llm(fast=True) or llm,
+                    llm=fast_llm or llm,
                     system_prompt=system_prompt,
                     user_prompt=user_prompt,
                     original_query=query,
@@ -1509,42 +1779,52 @@ class KnowledgeAgent:
             performance=dict(state.get("performance", {})),
         )
 
-    def _get_llm(self, *, fast: bool = False) -> Any | None:
+    def _llm_cache_hit(self, *, fast: bool = False) -> bool:
         if fast:
             fast_deployment = self.settings.azure_openai_fast_deployment or self.settings.azure_openai_deployment
             normal_deployment = self.settings.azure_openai_deployment
             if self._fast_llm is not None:
-                return self._fast_llm
-            if self._llm is not None and (not fast_deployment or fast_deployment == normal_deployment):
-                return self._llm
-        elif self._llm is not None:
-            return self._llm
-        try:
-            from langchain_openai import AzureChatOpenAI
+                return True
+            return self._llm is not None and (not fast_deployment or fast_deployment == normal_deployment)
+        return self._llm is not None
 
-            secrets = self.secret_provider.load_azure_openai()
-            deployment = secrets.fast_chat_deployment if fast else secrets.chat_deployment
-            llm = AzureChatOpenAI(
-                azure_endpoint=secrets.endpoint,
-                api_key=secrets.api_key,
-                api_version=secrets.api_version,
-                azure_deployment=deployment,
-                temperature=0,
-                timeout=60,
-                max_retries=2,
-            )
+    def _get_llm(self, *, fast: bool = False) -> Any | None:
+        with self._llm_lock:
             if fast:
-                self._fast_llm = llm
-            else:
-                self._llm = llm
-            self._llm_error = None
-        except Exception as exc:
-            self._llm_error = f"{type(exc).__name__}: {exc}"
-            if fast:
-                self._fast_llm = None
-            else:
-                self._llm = None
-        return self._fast_llm if fast else self._llm
+                fast_deployment = self.settings.azure_openai_fast_deployment or self.settings.azure_openai_deployment
+                normal_deployment = self.settings.azure_openai_deployment
+                if self._fast_llm is not None:
+                    return self._fast_llm
+                if self._llm is not None and (not fast_deployment or fast_deployment == normal_deployment):
+                    return self._llm
+            elif self._llm is not None:
+                return self._llm
+            try:
+                from langchain_openai import AzureChatOpenAI
+
+                secrets = self.secret_provider.load_azure_openai()
+                deployment = secrets.fast_chat_deployment if fast else secrets.chat_deployment
+                llm = AzureChatOpenAI(
+                    azure_endpoint=secrets.endpoint,
+                    api_key=secrets.api_key,
+                    api_version=secrets.api_version,
+                    azure_deployment=deployment,
+                    temperature=0,
+                    timeout=60,
+                    max_retries=2,
+                )
+                if fast:
+                    self._fast_llm = llm
+                else:
+                    self._llm = llm
+                self._llm_error = None
+            except Exception as exc:
+                self._llm_error = f"{type(exc).__name__}: {exc}"
+                if fast:
+                    self._fast_llm = None
+                else:
+                    self._llm = None
+            return self._fast_llm if fast else self._llm
 
     def invalidate_caches(self) -> None:
         self._catalog_candidate_cache.clear()

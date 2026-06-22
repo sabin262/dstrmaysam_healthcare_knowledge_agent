@@ -541,7 +541,15 @@ class AdminDocumentApiTests(unittest.TestCase):
                     "ragas_provider": "ragas",
                     "langfuse_ragas_published": True,
                     "guardrail_applied": False,
-                    "performance": {"agent_mode": "fast_rag"},
+                    "performance": {
+                        "agent_mode": "fast_rag",
+                        "total_ms": 1200,
+                        "history_load_ms": 5,
+                        "langfuse_prompt_ms": 8,
+                        "agent_execution_ms": 1000,
+                        "llm_final_ms": 700,
+                        "retrieval_search_ms": 220,
+                    },
                     "safety": {"risk_level": "low"},
                 },
             ),
@@ -569,6 +577,20 @@ class AdminDocumentApiTests(unittest.TestCase):
         self.assertEqual(payload["queries"][0]["tool_flow_summary"], "document_catalog -> rag_search")
         self.assertEqual(payload["queries"][0]["tool_flow"][0]["tool"], "document_catalog")
         self.assertEqual(payload["queries"][0]["tool_flow"][0]["helper_for"], "rag_search")
+        self.assertEqual(payload["queries"][0]["latency_breakdown"]["total_ms"], 1200)
+        self.assertEqual(
+            payload["queries"][0]["latency_breakdown"]["top_level"]["agent_execution_ms"],
+            1000,
+        )
+        self.assertEqual(
+            payload["queries"][0]["latency_breakdown"]["sections"]["llm"]["llm_final_ms"],
+            700,
+        )
+        self.assertEqual(
+            payload["queries"][0]["latency_breakdown"]["raw_timing_metrics"]["retrieval_search_ms"],
+            220,
+        )
+        self.assertIn("agent 1000 ms", payload["queries"][0]["latency_breakdown_summary"])
         self.assertEqual(payload["queries"][0]["ragas"]["ragas_answer_relevancy"], 0.7)
         self.assertTrue(payload["queries"][0]["langfuse_ragas_published"])
         self.assertEqual(payload["queries"][0]["source_document_keys"], ["raw/policy.md"])

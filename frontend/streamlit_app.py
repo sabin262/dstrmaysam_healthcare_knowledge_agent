@@ -308,6 +308,86 @@ def count_rows(counts: dict[str, Any], label: str) -> list[dict[str, Any]]:
     ]
 
 
+def latency_rows(values: dict[str, Any], labels: dict[str, str]) -> list[dict[str, Any]]:
+    rows = []
+    for key, label in labels.items():
+        try:
+            value = int(values.get(key) or 0)
+        except Exception:
+            value = 0
+        if value:
+            rows.append({"Phase": label, "Latency ms": value})
+    rows.sort(key=lambda row: int(row["Latency ms"]), reverse=True)
+    return rows
+
+
+def latency_section_rows(sections: dict[str, Any]) -> list[dict[str, Any]]:
+    rows = []
+    for section, metrics in sections.items():
+        if not isinstance(metrics, dict):
+            continue
+        for metric, value in metrics.items():
+            if isinstance(value, (dict, list)):
+                display_value = json.dumps(value)
+            else:
+                display_value = str(value)
+            rows.append(
+                {
+                    "Section": str(section).replace("_", " ").title(),
+                    "Metric": str(metric),
+                    "Value": display_value,
+                }
+            )
+    return rows
+
+
+def raw_latency_rows(metrics: dict[str, Any]) -> list[dict[str, Any]]:
+    rows = []
+    for metric, value in sorted(metrics.items()):
+        try:
+            latency_ms = int(value or 0)
+        except Exception:
+            continue
+        rows.append({"Metric": str(metric), "Latency ms": latency_ms})
+    rows.sort(key=lambda row: int(row["Latency ms"]), reverse=True)
+    return rows
+
+
+def counter_rows(counters: dict[str, Any]) -> list[dict[str, Any]]:
+    rows = []
+    for metric, value in sorted(counters.items()):
+        try:
+            count = int(value or 0)
+        except Exception:
+            continue
+        rows.append({"Metric": str(metric), "Value": count})
+    return rows
+
+
+def tool_latency_rows(tool_timings: list[Any]) -> list[dict[str, Any]]:
+    rows = []
+    for item in tool_timings:
+        if not isinstance(item, dict):
+            continue
+        rows.append(
+            {
+                "Tool": item.get("tool", ""),
+                "Total ms": int(item.get("total_ms") or 0),
+                "Catalog ms": int(item.get("catalog_ms") or 0),
+                "Retrieval ms": int(item.get("retrieval_search_ms") or 0),
+                "Embedding ms": int(item.get("embedding_ms") or 0),
+                "OpenSearch ms": int(item.get("opensearch_ms") or 0),
+                "Neighbor ms": int(item.get("neighbor_ms") or 0),
+                "Access filter ms": int(item.get("access_filter_ms") or 0),
+                "Vector hits": int(item.get("vector_hits") or 0),
+                "Keyword hits": int(item.get("keyword_hits") or 0),
+                "Neighbor hits": int(item.get("neighbor_hits") or 0),
+                "Returned hits": int(item.get("returned_hits") or 0),
+            }
+        )
+    return rows
+
+
 def render_admin_dashboard() -> None:
     st.header("Dashboard")
     try:
@@ -373,6 +453,7 @@ def render_admin_dashboard() -> None:
                 "Sources": item.get("source_count", 0),
                 "Tokens": item.get("total_tokens", 0),
                 "Latency ms": item.get("latency_ms", 0),
+                "Latency breakdown": item.get("latency_breakdown_summary", ""),
                 "Faithfulness": format_score((item.get("ragas") or {}).get("ragas_faithfulness")),
                 "Relevancy": format_score((item.get("ragas") or {}).get("ragas_answer_relevancy")),
                 "Context precision": format_score((item.get("ragas") or {}).get("ragas_context_precision")),
@@ -402,12 +483,90 @@ def render_admin_dashboard() -> None:
             st.write(item.get("query", ""))
             st.markdown("**Answer**")
             st.write(item.get("answer", ""))
+            latency_breakdown = item.get("latency_breakdown") if isinstance(item.get("latency_breakdown"), dict) else {}
+            if latency_breakdown:
+                top_level = latency_breakdown.get("top_level") if isinstance(latency_breakdown.get("top_level"), dict) else {}
+                agent_detail = latency_breakdown.get("agent_detail") if isinstance(latency_breakdown.get("agent_detail"), dict) else {}
+                top_level_rows = latency_rows(
+                    top_level,
+                    {
+                        "agent_execution_ms": "Agent execution",
+                        "history_load_ms": "History load",
+                        "trace_setup_ms": "Langfuse trace setup",
+                        "prompt_load_ms": "Prompt load",
+                        "initial_safety_ms": "Initial safety",
+                        "response_guardrail_ms": "Response guardrail",
+                        "final_safety_ms": "Final safety",
+                        "history_save_ms": "History save",
+                        "unattributed_ms": "Other",
+                    },
+                )
+                agent_rows = latency_rows(
+                    agent_detail,
+                    {
+                        "llm_total_ms": "LLM calls",
+                        "llm_tool_choice_ms": "LLM tool choice",
+                        "llm_final_ms": "LLM final answer",
+                        "llm_direct_answer_ms": "LLM direct answer",
+                        "llm_setup_ms": "LLM setup",
+                        "fast_llm_setup_ms": "Fast LLM setup",
+                        "langfuse_callbacks_ms": "Langfuse callbacks",
+                        "catalog_ms": "Document catalog",
+                        "retrieval_search_ms": "Retrieval search",
+                        "embedding_ms": "Embedding",
+                        "opensearch_ms": "OpenSearch",
+                        "neighbor_ms": "Neighbor chunks",
+                        "access_filter_ms": "Access filtering",
+                    },
+                )
+                timing_columns = st.columns(2)
+                with timing_columns[0]:
+                    st.markdown("**Latency breakdown**")
+                    if top_level_rows:
+                        st.dataframe(top_level_rows, hide_index=True, use_container_width=True)
+                    else:
+                        st.caption("No phase timings captured.")
+                with timing_columns[1]:
+                    st.markdown("**Agent detail**")
+                    if agent_rows:
+                        st.dataframe(agent_rows, hide_index=True, use_container_width=True)
+                    else:
+                        st.caption("No agent detail timings captured.")
+                tool_rows = tool_latency_rows(latency_breakdown.get("tool_timings") or [])
+                if tool_rows:
+                    st.markdown("**Tool timings**")
+                    st.dataframe(tool_rows, hide_index=True, use_container_width=True)
+                section_rows = latency_section_rows(
+                    latency_breakdown.get("sections")
+                    if isinstance(latency_breakdown.get("sections"), dict)
+                    else {}
+                )
+                if section_rows:
+                    st.markdown("**Detailed latency sections**")
+                    st.dataframe(section_rows, hide_index=True, use_container_width=True)
+                raw_rows = raw_latency_rows(
+                    latency_breakdown.get("raw_timing_metrics")
+                    if isinstance(latency_breakdown.get("raw_timing_metrics"), dict)
+                    else {}
+                )
+                if raw_rows:
+                    st.markdown("**All captured timing metrics**")
+                    st.dataframe(raw_rows, hide_index=True, use_container_width=True)
+                total_rows = counter_rows(
+                    latency_breakdown.get("tool_timing_totals")
+                    if isinstance(latency_breakdown.get("tool_timing_totals"), dict)
+                    else {}
+                )
+                if total_rows:
+                    st.markdown("**Tool totals and hit counts**")
+                    st.dataframe(total_rows, hide_index=True, use_container_width=True)
             st.markdown("**Tools and source keys**")
             st.json(
                 {
                     "tools_used": item.get("tools_used", []),
                     "tool_flow": item.get("tool_flow", []),
                     "source_document_keys": item.get("source_document_keys", []),
+                    "latency_breakdown": item.get("latency_breakdown", {}),
                     "agent_mode": item.get("agent_mode"),
                     "ragas": item.get("ragas", {}),
                     "ragas_status": item.get("ragas_status"),

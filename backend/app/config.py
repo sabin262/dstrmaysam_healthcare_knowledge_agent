@@ -51,6 +51,9 @@ class AppSettings:
     rag_parallel_search_enabled: bool = False
     chat_background_history_save_enabled: bool = False
     langfuse_background_trace_update_enabled: bool = False
+    chat_warmup_enabled: bool = True
+    chat_warmup_llm_call_enabled: bool = False
+    chat_warmup_retrieval_enabled: bool = True
     local_data_dir: str = "/app/data"
     chroma_persist_dir: str = "/app/data/chroma"
     chroma_collection: str = "dstrmaysam-healthcare-knowledge-agent"
@@ -123,6 +126,9 @@ class AppSettings:
             rag_parallel_search_enabled=_env_bool("RAG_PARALLEL_SEARCH_ENABLED", True),
             chat_background_history_save_enabled=_env_bool("CHAT_BACKGROUND_HISTORY_SAVE_ENABLED", True),
             langfuse_background_trace_update_enabled=_env_bool("LANGFUSE_BACKGROUND_TRACE_UPDATE_ENABLED", True),
+            chat_warmup_enabled=_env_bool("CHAT_WARMUP_ENABLED", True),
+            chat_warmup_llm_call_enabled=_env_bool("CHAT_WARMUP_LLM_CALL_ENABLED", False),
+            chat_warmup_retrieval_enabled=_env_bool("CHAT_WARMUP_RETRIEVAL_ENABLED", True),
             local_data_dir=_env("LOCAL_DATA_DIR", "/app/data"),
             chroma_persist_dir=_env("CHROMA_PERSIST_DIR", "/app/data/chroma"),
             chroma_collection=_env("CHROMA_COLLECTION", "dstrmaysam-healthcare-knowledge-agent"),
@@ -171,6 +177,9 @@ class AppSettings:
             "rag_parallel_search_enabled": str(self.rag_parallel_search_enabled),
             "chat_background_history_save_enabled": str(self.chat_background_history_save_enabled),
             "langfuse_background_trace_update_enabled": str(self.langfuse_background_trace_update_enabled),
+            "chat_warmup_enabled": str(self.chat_warmup_enabled),
+            "chat_warmup_llm_call_enabled": str(self.chat_warmup_llm_call_enabled),
+            "chat_warmup_retrieval_enabled": str(self.chat_warmup_retrieval_enabled),
             "local_data_dir": self.local_data_dir,
             "chroma_persist_dir": self.chroma_persist_dir,
             "chroma_collection": self.chroma_collection,

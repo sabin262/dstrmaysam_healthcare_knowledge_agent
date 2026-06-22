@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import csv
+from contextlib import asynccontextmanager
 from functools import lru_cache
 import io
 from pathlib import PurePath
 import re
+import threading
 
 from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -123,7 +125,27 @@ def get_agent() -> KnowledgeAgent:
     )
 
 
-app = FastAPI(title="Dstrmaysam Healthcare Knowledge Agent", version="0.1.0")
+def _run_backend_warmup() -> None:
+    try:
+        get_agent().warm_up()
+    except Exception:
+        return
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    if not get_settings().chat_warmup_enabled:
+        yield
+        return
+    threading.Thread(target=_run_backend_warmup, daemon=True).start()
+    yield
+
+
+app = FastAPI(
+    title="Dstrmaysam Healthcare Knowledge Agent",
+    version="0.1.0",
+    lifespan=lifespan,
+)
 settings = get_settings()
 if settings.cors_origins:
     app.add_middleware(
@@ -307,6 +329,191 @@ def _tool_flow_summary(tool_flow: list[dict[str, object]]) -> str:
     return " -> ".join(names)
 
 
+def _metric_ms(performance: dict[str, object], key: str) -> int:
+    try:
+        return int(performance.get(key) or 0)
+    except Exception:
+        return 0
+
+
+def _tool_timing_totals(tool_timings: list[dict[str, object]]) -> dict[str, int]:
+    totals: dict[str, int] = {
+        "tool_count": len(tool_timings),
+        "catalog_ms": 0,
+        "retrieval_search_ms": 0,
+        "embedding_ms": 0,
+        "opensearch_ms": 0,
+        "neighbor_ms": 0,
+        "access_filter_ms": 0,
+        "total_ms": 0,
+        "vector_hits": 0,
+        "keyword_hits": 0,
+        "neighbor_hits": 0,
+        "returned_hits": 0,
+    }
+    for item in tool_timings:
+        for key in totals:
+            if key == "tool_count":
+                continue
+            try:
+                totals[key] += int(item.get(key) or 0)
+            except Exception:
+                pass
+    return totals
+
+
+def _raw_timing_metrics(performance: dict[str, object]) -> dict[str, int]:
+    timings: dict[str, int] = {}
+    for key, value in performance.items():
+        if key == "latency_breakdown":
+            continue
+        if key.endswith("_ms") or key == "total_ms":
+            try:
+                timings[key] = int(value or 0)
+            except Exception:
+                pass
+    return dict(sorted(timings.items()))
+
+
+def _dashboard_latency_breakdown(
+    metadata: dict[str, object],
+    performance: dict[str, object],
+    latency_ms: int,
+) -> dict[str, object]:
+    existing = metadata.get("latency_breakdown")
+    if isinstance(existing, dict):
+        if isinstance(existing.get("sections"), dict):
+            return existing
+    existing = performance.get("latency_breakdown")
+    if isinstance(existing, dict):
+        if isinstance(existing.get("sections"), dict):
+            return existing
+
+    tool_timings = [dict(item) for item in performance.get("tool_timings") or [] if isinstance(item, dict)]
+    tool_totals = _tool_timing_totals(tool_timings)
+    trace_setup_ms = _metric_ms(performance, "langfuse_trace_create_ms") + _metric_ms(
+        performance,
+        "langfuse_trace_enter_ms",
+    )
+    top_level = {
+        "history_load_ms": _metric_ms(performance, "history_load_ms"),
+        "trace_setup_ms": trace_setup_ms,
+        "prompt_load_ms": _metric_ms(performance, "langfuse_prompt_ms"),
+        "initial_safety_ms": _metric_ms(performance, "initial_safety_ms"),
+        "agent_execution_ms": _metric_ms(performance, "agent_execution_ms"),
+        "response_guardrail_ms": _metric_ms(performance, "response_guardrail_llm_ms"),
+        "final_safety_ms": _metric_ms(performance, "final_safety_ms"),
+        "history_save_ms": _metric_ms(performance, "history_save_ms"),
+    }
+    top_level["unattributed_ms"] = max(0, int(latency_ms) - sum(top_level.values()))
+    agent_detail = {
+        "llm_setup_ms": _metric_ms(performance, "llm_setup_ms"),
+        "fast_llm_setup_ms": _metric_ms(performance, "fast_llm_setup_ms"),
+        "langfuse_callbacks_ms": _metric_ms(performance, "langfuse_callbacks_ms"),
+        "llm_tool_choice_ms": _metric_ms(performance, "llm_tool_choice_ms"),
+        "llm_final_ms": _metric_ms(performance, "llm_final_ms"),
+        "llm_direct_answer_ms": _metric_ms(performance, "llm_direct_answer_ms"),
+        "llm_total_ms": _metric_ms(performance, "llm_tool_choice_ms")
+        + _metric_ms(performance, "llm_final_ms")
+        + _metric_ms(performance, "llm_direct_answer_ms"),
+        "catalog_ms": _metric_ms(performance, "catalog_ms"),
+        "retrieval_search_ms": _metric_ms(performance, "retrieval_search_ms"),
+        "embedding_ms": _metric_ms(performance, "embedding_ms"),
+        "opensearch_ms": _metric_ms(performance, "opensearch_ms"),
+        "neighbor_ms": _metric_ms(performance, "neighbor_ms"),
+        "access_filter_ms": _metric_ms(performance, "access_filter_ms"),
+    }
+    sections = {
+        "history": {
+            "load_ms": _metric_ms(performance, "history_load_ms"),
+            "save_ms": _metric_ms(performance, "history_save_ms"),
+            "save_background": bool(performance.get("history_save_background")),
+        },
+        "observability": {
+            "langfuse_trace_create_ms": _metric_ms(performance, "langfuse_trace_create_ms"),
+            "langfuse_trace_enter_ms": _metric_ms(performance, "langfuse_trace_enter_ms"),
+            "trace_setup_ms": trace_setup_ms,
+            "langfuse_prompt_ms": _metric_ms(performance, "langfuse_prompt_ms"),
+            "langfuse_callbacks_ms": _metric_ms(performance, "langfuse_callbacks_ms"),
+        },
+        "safety_and_guardrail": {
+            "initial_safety_ms": _metric_ms(performance, "initial_safety_ms"),
+            "response_guardrail_llm_ms": _metric_ms(performance, "response_guardrail_llm_ms"),
+            "response_guardrail_applied": bool(performance.get("response_guardrail_applied")),
+            "response_guardrail_changed": bool(performance.get("response_guardrail_changed")),
+            "response_guardrail_reason": str(performance.get("response_guardrail_reason") or ""),
+            "final_safety_ms": _metric_ms(performance, "final_safety_ms"),
+        },
+        "agent_orchestration": {
+            "agent_execution_ms": _metric_ms(performance, "agent_execution_ms"),
+            "agent_mode": str(performance.get("agent_mode") or ""),
+            "planned_tools": list(performance.get("planned_tools") or []),
+            "llm_call_count": int(performance.get("llm_call_count") or 0),
+        },
+        "llm": {
+            "llm_setup_ms": _metric_ms(performance, "llm_setup_ms"),
+            "llm_cache_hit": bool(performance.get("llm_cache_hit")),
+            "llm_setup_cold_start": bool(performance.get("llm_setup_cold_start")),
+            "fast_llm_setup_ms": _metric_ms(performance, "fast_llm_setup_ms"),
+            "fast_llm_cache_hit": bool(performance.get("fast_llm_cache_hit")),
+            "fast_llm_setup_cold_start": bool(performance.get("fast_llm_setup_cold_start")),
+            "llm_tool_choice_ms": _metric_ms(performance, "llm_tool_choice_ms"),
+            "llm_final_ms": _metric_ms(performance, "llm_final_ms"),
+            "llm_direct_answer_ms": _metric_ms(performance, "llm_direct_answer_ms"),
+            "llm_total_ms": agent_detail["llm_total_ms"],
+        },
+        "retrieval_and_catalog": {
+            "catalog_ms": _metric_ms(performance, "catalog_ms"),
+            "retrieval_search_ms": _metric_ms(performance, "retrieval_search_ms"),
+            "embedding_ms": _metric_ms(performance, "embedding_ms"),
+            "opensearch_ms": _metric_ms(performance, "opensearch_ms"),
+            "neighbor_ms": _metric_ms(performance, "neighbor_ms"),
+            "access_filter_ms": _metric_ms(performance, "access_filter_ms"),
+            "tool_total_ms": tool_totals["total_ms"],
+            "vector_hits": tool_totals["vector_hits"],
+            "keyword_hits": tool_totals["keyword_hits"],
+            "neighbor_hits": tool_totals["neighbor_hits"],
+            "returned_hits": tool_totals["returned_hits"],
+        },
+    }
+    return {
+        "total_ms": int(latency_ms),
+        "top_level": top_level,
+        "agent_detail": agent_detail,
+        "sections": sections,
+        "raw_timing_metrics": _raw_timing_metrics(performance),
+        "tool_timing_totals": tool_totals,
+        "tool_timings": tool_timings,
+    }
+
+
+def _latency_breakdown_summary(latency_breakdown: dict[str, object]) -> str:
+    top_level = latency_breakdown.get("top_level")
+    if not isinstance(top_level, dict):
+        return ""
+    labels = {
+        "agent_execution_ms": "agent",
+        "history_load_ms": "history load",
+        "trace_setup_ms": "trace",
+        "prompt_load_ms": "prompt",
+        "initial_safety_ms": "initial safety",
+        "response_guardrail_ms": "guardrail",
+        "final_safety_ms": "final safety",
+        "history_save_ms": "history save",
+        "unattributed_ms": "other",
+    }
+    values: list[tuple[str, int]] = []
+    for key, label in labels.items():
+        try:
+            value = int(top_level.get(key) or 0)
+        except Exception:
+            value = 0
+        if value:
+            values.append((label, value))
+    values.sort(key=lambda item: item[1], reverse=True)
+    return ", ".join(f"{label} {value} ms" for label, value in values[:3])
+
+
 def current_user_context(
     credentials: HTTPAuthorizationCredentials | None = Depends(security),
 ) -> HealthcareUserContext:
@@ -361,6 +568,7 @@ def health() -> dict[str, object]:
         "status": "ok",
         "settings": get_settings().public_summary(),
         "registered_tools": agent.registered_tool_names(),
+        "warmup": agent.warmup_status(),
     }
 
 
@@ -600,6 +808,7 @@ def admin_dashboard(
         tool_flow = _tool_flow_from_metadata(metadata, tools_used)
         sources = metadata.get("sources", []) if isinstance(metadata.get("sources"), list) else []
         latency_ms = int(metadata.get("latency_ms") or performance.get("total_ms") or 0)
+        latency_breakdown = _dashboard_latency_breakdown(metadata, performance, latency_ms)
         input_token_count = int(metadata.get("input_tokens") or 0)
         output_token_count = int(metadata.get("output_tokens") or 0)
         total_token_count = input_token_count + output_token_count
@@ -649,6 +858,8 @@ def admin_dashboard(
                 "source_count": len(sources),
                 "source_document_keys": metadata.get("source_document_keys", []),
                 "latency_ms": latency_ms,
+                "latency_breakdown": latency_breakdown,
+                "latency_breakdown_summary": _latency_breakdown_summary(latency_breakdown),
                 "input_tokens": input_token_count,
                 "output_tokens": output_token_count,
                 "total_tokens": total_token_count,
@@ -685,6 +896,13 @@ def admin_dashboard(
         },
     }
     return {"summary": summary, "queries": rows}
+
+
+@app.post("/admin/warmup")
+def admin_warmup(
+    user: HealthcareUserContext = Depends(admin_user_context),
+) -> dict[str, object]:
+    return get_agent().warm_up()
 
 
 @app.get("/admin/patient-details")
@@ -733,6 +951,7 @@ def chat(request: ChatRequest, user: HealthcareUserContext = Depends(active_user
         safety=result.metadata.get("safety", {}),
         audit_event=result.metadata.get("audit_event", {}),
         performance=result.metadata.get("performance", {}),
+        latency_breakdown=result.metadata.get("latency_breakdown", {}),
     )
 
 
