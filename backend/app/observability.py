@@ -144,6 +144,33 @@ class ObservabilityClient:
             self._callbacks = []
         return self._callbacks
 
+    def publish_scores(
+        self,
+        *,
+        trace_id: str,
+        scores: dict[str, float],
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        status: dict[str, Any] = {"published": False, "error": None}
+        if not scores:
+            return status
+        try:
+            client = self._get_langfuse_client()
+            for name, value in scores.items():
+                client.create_score(
+                    name=name,
+                    value=float(value),
+                    trace_id=trace_id,
+                    data_type="NUMERIC",
+                    metadata=metadata or {},
+                )
+            if hasattr(client, "flush"):
+                client.flush()
+            status["published"] = True
+        except Exception as exc:
+            status["error"] = f"{type(exc).__name__}: {exc}"
+        return status
+
     def system_prompt(self) -> tuple[str, str | None]:
         ttl_seconds = max(0, self.settings.langfuse_prompt_cache_ttl_seconds)
         now = time.monotonic()

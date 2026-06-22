@@ -7,7 +7,6 @@ from unittest import mock
 
 from backend.app import main
 from backend.app.config import AppSettings
-from backend.app.history import InMemoryChatHistoryRepository
 from backend.app.local_chroma import LocalChromaIngestionJob, LocalChromaRetrievalService
 from backend.app.secrets import EnvSecretProvider, SecretProvider, StaticSecretProvider
 from backend.app.storage import LocalDocumentStore
@@ -134,7 +133,10 @@ class LocalModeTests(unittest.TestCase):
             factory.cache_clear()
         with mock.patch.object(main, "get_settings", lambda: app_settings):
             self.assertIsInstance(main.get_secret_provider(), EnvSecretProvider)
-            self.assertIsInstance(main.get_history_repository(), InMemoryChatHistoryRepository)
+            with mock.patch.object(main, "PostgresChatHistoryRepository") as history_class:
+                main.get_history_repository.cache_clear()
+                main.get_history_repository()
+                history_class.assert_called_once_with(app_settings)
             self.assertIsInstance(main.get_document_store(), LocalDocumentStore)
             self.assertIsInstance(main.get_retrieval_service(), LocalChromaRetrievalService)
             self.assertIsInstance(main.create_ingestion_job(), LocalChromaIngestionJob)

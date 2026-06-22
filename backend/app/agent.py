@@ -20,6 +20,7 @@ from .healthcare import (
 from .healthcare_tools import build_healthcare_agent_tools
 from .history import ChatHistoryRepository, ChatMessage, build_history_context
 from .observability import ObservabilityClient
+from .ragas_scoring import compute_live_ragas_scores
 from .retrieval import RetrievalHit, RetrievalService
 from .secrets import SecretProvider
 from .storage import DocumentStore
@@ -582,6 +583,14 @@ class KnowledgeAgent:
                         "performance": performance,
                     },
                 )
+                self._run_background_ragas_scoring(
+                    question=safe_query,
+                    answer=answer,
+                    sources=sources,
+                    trace_id=trace_id,
+                    user_id=user_id,
+                    session_id=session_id,
+                )
             finally:
                 self.tools = original_tools
 
@@ -645,6 +654,72 @@ class KnowledgeAgent:
             self.history.save_message(user_id, session_id, assistant_message)
         except Exception:
             return
+
+    def _run_background_ragas_scoring(
+        self,
+        *,
+        question: str,
+        answer: str,
+        sources: list[dict[str, Any]],
+        trace_id: str,
+        user_id: str,
+        session_id: str,
+    ) -> None:
+        thread = threading.Thread(
+            target=self._score_and_publish_ragas,
+            kwargs={
+                "question": question,
+                "answer": answer,
+                "sources": sources,
+                "trace_id": trace_id,
+                "user_id": user_id,
+                "session_id": session_id,
+            },
+            daemon=True,
+        )
+        thread.start()
+
+    def _score_and_publish_ragas(
+        self,
+        *,
+        question: str,
+        answer: str,
+        sources: list[dict[str, Any]],
+        trace_id: str,
+        user_id: str,
+        session_id: str,
+    ) -> None:
+        result = compute_live_ragas_scores(question=question, answer=answer, sources=sources)
+        scores = {
+            key: float(value)
+            for key, value in (result.get("scores") or {}).items()
+            if value is not None
+        }
+        publish_status = self.observability.publish_scores(
+            trace_id=trace_id,
+            scores=scores,
+            metadata={
+                "user_id": user_id,
+                "session_id": session_id,
+                "provider": result.get("provider"),
+                "status": result.get("status"),
+            },
+        )
+        metadata_update = {
+            "ragas": scores,
+            "ragas_status": result.get("status"),
+            "ragas_provider": result.get("provider"),
+            "ragas_error": result.get("error"),
+            "langfuse_ragas_published": bool(publish_status.get("published")),
+            "langfuse_ragas_error": publish_status.get("error"),
+        }
+        for _ in range(10):
+            try:
+                if self.history.update_message_metadata_by_trace_id(trace_id, metadata_update):
+                    return
+            except Exception:
+                return
+            time.sleep(0.2)
 
     def _apply_llm_response_guardrail(
         self,
