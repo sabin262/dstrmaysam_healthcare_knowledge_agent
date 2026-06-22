@@ -31,6 +31,7 @@ def settings(**overrides):
 class FakeOpenSearchClient:
     def __init__(self, responses=None):
         self.search_calls = []
+        self.msearch_calls = []
         self.responses = list(responses or [])
 
     def search(self, index, body):
@@ -38,6 +39,17 @@ class FakeOpenSearchClient:
         if self.responses:
             return self.responses.pop(0)
         return {"hits": {"hits": []}}
+
+
+class FakeMSearchOpenSearchClient(FakeOpenSearchClient):
+    def msearch(self, body):
+        self.msearch_calls.append({"body": body})
+        responses = []
+        while self.responses and len(responses) < len(body) // 2:
+            responses.append(self.responses.pop(0))
+        while len(responses) < len(body) // 2:
+            responses.append({"hits": {"hits": []}})
+        return {"responses": responses}
 
 
 class RetrievalQueryTests(unittest.TestCase):
@@ -151,14 +163,55 @@ class RetrievalQueryTests(unittest.TestCase):
 
         self.assertEqual(len(service._opensearch.search_calls), 3)
         self.assertEqual([hit.metadata["_chunk_index"] for hit in hits], [2, 3, 1])
+        neighbor_query = service._opensearch.search_calls[2]["body"]["query"]["bool"]
+        self.assertEqual(neighbor_query["minimum_should_match"], 1)
         self.assertEqual(
-            service._opensearch.search_calls[2]["body"]["query"]["bool"]["filter"],
+            neighbor_query["should"][0]["bool"]["filter"],
             [{"term": {"key": "raw/policy.md"}}, {"terms": {"chunk_index": [1, 4]}}],
         )
         self.assertEqual(hits[1].metadata["document_type"], "policy")
         self.assertEqual(service.last_timing_ms["vector_hits"], 1)
         self.assertEqual(service.last_timing_ms["keyword_hits"], 1)
         self.assertEqual(service.last_timing_ms["neighbor_hits"], 1)
+
+    def test_vector_and_keyword_search_use_msearch_when_available(self):
+        responses = [
+            {"hits": {"hits": []}},
+            {"hits": {"hits": []}},
+        ]
+        app_settings = settings(rag_top_k=5, rag_neighbor_chunks=0, rag_parallel_search_enabled=True)
+        service = RetrievalService(
+            app_settings,
+            StaticSecretProvider(app_settings, {"/test/app": {"session_secret": "secret"}}),
+        )
+        service._opensearch = FakeMSearchOpenSearchClient(responses)
+        service._embed_query = lambda query: [0.1, 0.2, 0.3]
+
+        service.search("leave policy")
+
+        self.assertEqual(len(service._opensearch.msearch_calls), 1)
+        self.assertEqual(len(service._opensearch.search_calls), 0)
+        self.assertEqual(len(service._opensearch.msearch_calls[0]["body"]), 4)
+
+    def test_retrieval_result_cache_reuses_query_results(self):
+        app_settings = settings(rag_query_cache_ttl_seconds=60, rag_neighbor_chunks=0)
+        service = RetrievalService(
+            app_settings,
+            StaticSecretProvider(app_settings, {"/test/app": {"session_secret": "secret"}}),
+        )
+        service._opensearch = FakeOpenSearchClient(
+            [
+                {"hits": {"hits": []}},
+                {"hits": {"hits": []}},
+            ]
+        )
+        service._embed_query = lambda query: None
+
+        service.search("leave policy", document_keys=["raw/leave.md"])
+        service.search("  Leave   Policy ", document_keys=["raw/leave.md"])
+
+        self.assertEqual(len(service._opensearch.search_calls), 1)
+        self.assertEqual(service.last_timing_ms["cache_hit"], 1)
 
 
 if __name__ == "__main__":

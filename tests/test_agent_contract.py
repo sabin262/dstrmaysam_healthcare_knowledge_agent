@@ -126,6 +126,20 @@ class FakeLLM:
         return self.responses.pop(0)
 
 
+class FakeLookupResult:
+    def to_json(self):
+        return '{"category":"doctor","message":"Found 1 matching row(s).","rows":[{"doctor":"Dr Smith","status":"on call"}]}'
+
+
+class FakeDeterministicLookup:
+    def __init__(self):
+        self.calls = []
+
+    def lookup(self, query, user):
+        self.calls.append({"query": query, "user": user.user_id})
+        return FakeLookupResult()
+
+
 class EventHistory(InMemoryChatHistoryRepository):
     def __init__(self):
         super().__init__()
@@ -452,6 +466,116 @@ class AgentContractTests(unittest.TestCase):
             retrieval.calls[-1]["document_keys"],
             ["raw/leave.md"],
         )
+
+    def test_fast_planned_rag_path_uses_one_answer_call(self):
+        retrieval = FakeRetrieval()
+        fake_llm = FakeLLM([fake_ai_message("Fast planned RAG answer.")])
+        agent = make_agent(
+            fake_llm,
+            retrieval=retrieval,
+            app_settings=settings(
+                chat_fast_planned_execution_enabled=True,
+                chat_fast_rag_enabled=True,
+            ),
+        )
+
+        result = agent.answer("user", "What is leave policy?", session_id="session")
+
+        self.assertEqual(result.answer, "Fast planned RAG answer.")
+        self.assertEqual(result.tools_used, ["rag_search"])
+        self.assertEqual(len(fake_llm.messages), 1)
+        self.assertEqual(result.metadata["performance"]["agent_mode"], "fast_planned")
+
+    def test_fast_planned_deterministic_path_skips_tool_selection(self):
+        fake_llm = FakeLLM([fake_ai_message("Dr Smith is on call.")])
+        lookup = FakeDeterministicLookup()
+        agent = make_agent(
+            fake_llm,
+            app_settings=settings(chat_fast_planned_execution_enabled=True),
+        )
+        agent.deterministic_lookup = lookup
+
+        result = agent.answer("user", "Which doctor is on call today?", session_id="session")
+
+        self.assertEqual(result.answer, "Dr Smith is on call.")
+        self.assertEqual(result.tools_used, ["postgres_deterministic_lookup"])
+        self.assertEqual(len(fake_llm.messages), 1)
+        self.assertEqual(len(lookup.calls), 1)
+        self.assertEqual(result.metadata["performance"]["agent_mode"], "fast_planned")
+
+    def test_fast_planned_multipart_path_runs_tools_and_synthesizes_once(self):
+        retrieval = FakeRetrieval()
+        fake_llm = FakeLLM([fake_ai_message("Policy context plus Dr Smith on call.")])
+        lookup = FakeDeterministicLookup()
+        agent = make_agent(
+            fake_llm,
+            retrieval=retrieval,
+            app_settings=settings(
+                chat_fast_planned_execution_enabled=True,
+                chat_fast_rag_enabled=True,
+            ),
+        )
+        agent.deterministic_lookup = lookup
+
+        result = agent.answer(
+            "user",
+            "What is the leave policy and also which doctor is on call today?",
+            session_id="session",
+        )
+
+        self.assertEqual(result.tools_used, ["rag_search", "postgres_deterministic_lookup"])
+        self.assertEqual(len(fake_llm.messages), 1)
+        self.assertEqual(len(retrieval.calls), 1)
+        self.assertEqual(len(lookup.calls), 1)
+        self.assertIn("document_catalog", [step["tool"] for step in result.metadata["tool_flow"]])
+
+    def test_ambiguous_short_query_uses_langgraph_fallback(self):
+        fake_llm = FakeLLM([fake_ai_message("Hello."), fake_ai_message("Hello.")])
+        agent = make_agent(
+            fake_llm,
+            app_settings=settings(chat_fast_planned_execution_enabled=True),
+        )
+
+        result = agent.answer("user", "Hi", session_id="session")
+
+        self.assertEqual(result.answer, "Hello.")
+        self.assertEqual(result.tools_used, [])
+        self.assertEqual(result.metadata["performance"]["agent_mode"], "langgraph")
+
+    def test_fast_path_respects_rag_context_budget(self):
+        fake_llm = FakeLLM([fake_ai_message("Budgeted answer.")])
+        agent = make_agent(
+            fake_llm,
+            app_settings=settings(
+                chat_fast_planned_execution_enabled=True,
+                chat_fast_rag_enabled=True,
+                rag_context_max_chars=1200,
+                rag_snippet_chars=300,
+            ),
+        )
+
+        agent.answer("user", "What is leave policy?", session_id="session")
+
+        prompt = message_content(fake_llm.messages[0][1])
+        self.assertLessEqual(len(prompt.split("Retrieved knowledge context:\n", 1)[-1]), 1600)
+
+    def test_response_guardrail_uses_fast_llm_when_configured(self):
+        normal_llm = FakeLLM([fake_ai_message("Sure, because policies are hilarious.")])
+        fast_llm = FakeLLM([fake_ai_message("Policies should be described professionally.")])
+        agent = make_agent(
+            normal_llm,
+            app_settings=settings(
+                azure_openai_deployment="primary",
+                azure_openai_fast_deployment="fast",
+            ),
+        )
+        agent._fast_llm = fast_llm
+
+        result = agent.answer("user", "What is leave policy?", session_id="session")
+
+        self.assertEqual(result.answer, "Policies should be described professionally.")
+        self.assertEqual(len(normal_llm.messages), 1)
+        self.assertEqual(len(fast_llm.messages), 1)
 
     def test_policy_question_with_patient_keyword_uses_rag_plan(self):
         self.assertEqual(_planned_tool_names("What is the patient privacy policy?"), ["rag_search"])

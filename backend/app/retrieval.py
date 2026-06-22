@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, Sequence
@@ -26,6 +27,9 @@ class RetrievalService:
         self.secret_provider = secret_provider
         self._opensearch: Any | None = None
         self._embedding_model: Any | None = None
+        self._embedding_deployment_name: str = ""
+        self._embedding_cache: OrderedDict[tuple[str, str], list[float]] = OrderedDict()
+        self._search_cache: dict[tuple[Any, ...], tuple[float, list[RetrievalHit], dict[str, int]]] = {}
         self.last_timing_ms: dict[str, int] = {}
 
     @retry_transient
@@ -38,6 +42,13 @@ class RetrievalService:
         started = time.perf_counter()
         timing: dict[str, int] = {}
         result_limit = top_k or self.settings.rag_top_k
+        filtered_keys = list(dict.fromkeys(key for key in (document_keys or []) if key))
+        cache_key = self._search_cache_key(query, result_limit, filtered_keys)
+        cached = self._search_cache_get(cache_key)
+        if cached is not None:
+            hits, cached_timing = cached
+            self.last_timing_ms = {**cached_timing, "cache_hit": 1}
+            return list(hits)
         if not self.settings.opensearch_endpoint:
             self.last_timing_ms = {"total_ms": int((time.perf_counter() - started) * 1000)}
             return []
@@ -45,7 +56,6 @@ class RetrievalService:
         embedding_started = time.perf_counter()
         vector = self._embed_query(query)
         timing["embedding_ms"] = int((time.perf_counter() - embedding_started) * 1000)
-        filtered_keys = list(dict.fromkeys(key for key in (document_keys or []) if key))
         key_filter = {"terms": {"key": filtered_keys}} if filtered_keys else None
         bodies: list[tuple[str, dict[str, Any]]] = []
         if vector:
@@ -116,8 +126,10 @@ class RetrievalService:
         timing["keyword_hits"] = search_counts.get("keyword", 0)
         timing["neighbor_hits"] = len(neighbor_hits)
         timing["returned_hits"] = len(merged_hits)
+        timing["cache_hit"] = 0
         timing["total_ms"] = int((time.perf_counter() - started) * 1000)
         self.last_timing_ms = timing
+        self._search_cache_set(cache_key, merged_hits, timing)
         return merged_hits
 
     def _run_search_bodies(
@@ -130,6 +142,21 @@ class RetrievalService:
                 (search_type, client.search(index=self.settings.opensearch_index, body=body))
                 for search_type, body in bodies
             ]
+        if hasattr(client, "msearch"):
+            try:
+                request_body: list[dict[str, Any]] = []
+                for _, body in bodies:
+                    request_body.append({"index": self.settings.opensearch_index})
+                    request_body.append(body)
+                response = client.msearch(body=request_body)
+                responses = list(response.get("responses", []))
+                if len(responses) == len(bodies):
+                    return [
+                        (search_type, responses[index])
+                        for index, (search_type, _) in enumerate(bodies)
+                    ]
+            except Exception:
+                pass
 
         def run_one(item: tuple[str, dict[str, Any]]) -> tuple[str, dict[str, Any]]:
             search_type, body = item
@@ -195,27 +222,38 @@ class RetrievalService:
                     continue
                 requests.setdefault(key, set()).add(neighbor)
 
-        neighbor_hits: list[RetrievalHit] = []
+        clauses: list[dict[str, Any]] = []
+        total_wanted = 0
         for key, indexes in requests.items():
             wanted = sorted(index for index in indexes if (key, index) not in existing)
             if not wanted:
                 continue
-            response = client.search(
-                index=self.settings.opensearch_index,
-                body={
-                    "size": len(wanted),
-                    "query": {
-                        "bool": {
-                            "filter": [
-                                {"term": {"key": key}},
-                                {"terms": {"chunk_index": wanted}},
-                            ]
-                        }
-                    },
-                },
+            total_wanted += len(wanted)
+            clauses.append(
+                {
+                    "bool": {
+                        "filter": [
+                            {"term": {"key": key}},
+                            {"terms": {"chunk_index": wanted}},
+                        ]
+                    }
+                }
             )
-            neighbor_hits.extend(self._hits_from_response(response))
-        return neighbor_hits
+        if not clauses:
+            return []
+        response = client.search(
+            index=self.settings.opensearch_index,
+            body={
+                "size": total_wanted,
+                "query": {
+                    "bool": {
+                        "should": clauses,
+                        "minimum_should_match": 1,
+                    }
+                },
+            },
+        )
+        return self._hits_from_response(response)
 
     def _get_opensearch_client(self) -> Any:
         if self._opensearch is not None:
@@ -241,12 +279,61 @@ class RetrievalService:
                 from langchain_openai import AzureOpenAIEmbeddings
 
                 secrets = self.secret_provider.load_azure_openai()
+                self._embedding_deployment_name = secrets.embedding_deployment
                 self._embedding_model = AzureOpenAIEmbeddings(
                     azure_endpoint=secrets.endpoint,
                     api_key=secrets.api_key,
                     api_version=secrets.api_version,
                     azure_deployment=secrets.embedding_deployment,
                 )
-            return list(self._embedding_model.embed_query(query))
+            cache_key = (self._normalize_query(query), self._embedding_deployment_name)
+            if self.settings.rag_embedding_cache_size > 0 and cache_key in self._embedding_cache:
+                vector = self._embedding_cache.pop(cache_key)
+                self._embedding_cache[cache_key] = vector
+                return list(vector)
+            vector = list(self._embedding_model.embed_query(query))
+            if self.settings.rag_embedding_cache_size > 0:
+                self._embedding_cache[cache_key] = vector
+                while len(self._embedding_cache) > self.settings.rag_embedding_cache_size:
+                    self._embedding_cache.popitem(last=False)
+            return vector
         except Exception:
             return None
+
+    def _search_cache_key(self, query: str, top_k: int, document_keys: list[str]) -> tuple[Any, ...]:
+        return (
+            self._normalize_query(query),
+            tuple(document_keys),
+            self.settings.opensearch_index,
+            top_k,
+            self.settings.rag_neighbor_chunks,
+        )
+
+    def _search_cache_get(
+        self,
+        key: tuple[Any, ...],
+    ) -> tuple[list[RetrievalHit], dict[str, int]] | None:
+        ttl = max(0, self.settings.rag_query_cache_ttl_seconds)
+        if not ttl:
+            return None
+        cached = self._search_cache.get(key)
+        if cached is None:
+            return None
+        expires_at, hits, timing = cached
+        if time.monotonic() >= expires_at:
+            self._search_cache.pop(key, None)
+            return None
+        return list(hits), dict(timing)
+
+    def _search_cache_set(self, key: tuple[Any, ...], hits: list[RetrievalHit], timing: dict[str, int]) -> None:
+        ttl = max(0, self.settings.rag_query_cache_ttl_seconds)
+        if not ttl:
+            return
+        self._search_cache[key] = (time.monotonic() + ttl, list(hits), dict(timing))
+
+    def invalidate_cache(self) -> None:
+        self._search_cache.clear()
+        self._embedding_cache.clear()
+
+    def _normalize_query(self, query: str) -> str:
+        return " ".join(query.lower().split())

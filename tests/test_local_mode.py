@@ -207,6 +207,43 @@ class LocalModeTests(unittest.TestCase):
             self.assertEqual(len(collection.upserts), 1)
             self.assertTrue((Path(tmpdir) / "manifests" / "documents.json").exists())
 
+    def test_local_chroma_ingestion_preserves_metadata_only_csv_manifest_records(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            app_settings = settings(local_data_dir=tmpdir)
+            manifest_path = Path(tmpdir) / "manifests" / "documents.json"
+            manifest_path.parent.mkdir(parents=True)
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "documents": [
+                            {
+                                "key": "postgres://uploaded_lookup_rows/doctor_rota.csv",
+                                "title": "doctor_rota.csv",
+                                "uri": "postgres://uploaded_lookup_rows/doctor_rota.csv",
+                                "content_type": "text/csv",
+                                "metadata": {"asset_source": "postgres_uploaded_lookup"},
+                                "chunk_count": 0,
+                                "ingestion_status": "metadata_only",
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            raw_path = Path(tmpdir) / "raw" / "policy.txt"
+            raw_path.parent.mkdir(parents=True)
+            raw_path.write_text("Staff policy requires annual review.", encoding="utf-8")
+            job = LocalChromaIngestionJob(app_settings, StaticSecretProvider(app_settings, {}))
+            job._collection = FakeCollection()
+            job._embed = lambda text: [0.1, 0.2, 0.3]
+
+            result = job.run()
+
+            self.assertEqual(result["documents"][0]["key"], "postgres://uploaded_lookup_rows/doctor_rota.csv")
+            self.assertEqual(result["documents"][0]["ingestion_status"], "metadata_only")
+            self.assertEqual(result["documents"][1]["key"], "raw/policy.txt")
+            self.assertEqual(result["indexed_documents"], 1)
+
     def test_local_chroma_retrieval_returns_hits_and_neighbors(self):
         app_settings = settings(rag_top_k=1, rag_neighbor_chunks=1)
         collection = FakeCollection()

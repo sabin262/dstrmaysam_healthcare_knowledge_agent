@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import csv
 from functools import lru_cache
+import io
 from pathlib import PurePath
 import re
 
@@ -20,7 +22,7 @@ from .config import AppSettings
 from .deterministic_lookup import DeterministicLookupService
 from .healthcare import HealthcareUserContext
 from .history import PostgresChatHistoryRepository, create_chat_history_repository
-from .ingest import IngestionJob
+from .ingest import IngestionJob, checksum_bytes
 from .local_chroma import LocalChromaIngestionJob, LocalChromaRetrievalService
 from .models import (
     AdminDocumentUploadResponse,
@@ -179,6 +181,44 @@ def _safe_upload_filename(filename: str | None) -> str:
 def _raw_document_key(filename: str) -> str:
     prefix = get_settings().s3_raw_prefix.strip("/")
     return f"{prefix}/{filename}" if prefix else filename
+
+
+def _csv_manifest_record(filename: str, data: bytes, rows_inserted: int, content_type: str) -> dict[str, object]:
+    decoded = data.decode("utf-8-sig", errors="replace")
+    try:
+        reader = csv.DictReader(io.StringIO(decoded))
+        columns = [str(column).strip() for column in (reader.fieldnames or []) if str(column).strip()]
+    except Exception:
+        columns = []
+    key = f"postgres://uploaded_lookup_rows/{filename}"
+    return {
+        "key": key,
+        "title": filename,
+        "uri": key,
+        "content_type": content_type,
+        "checksum": checksum_bytes(data),
+        "metadata": {
+            "key": key,
+            "checksum": checksum_bytes(data),
+            "owner": "uploaded",
+            "version": "uploaded",
+            "effective_date": "unknown",
+            "review_date": "unknown",
+            "approval_status": "uploaded",
+            "sensitivity": "internal",
+            "domain": "deterministic_lookup",
+            "document_type": "csv_table",
+            "allowed_roles": ["staff", "admin", "manager", "doctor", "nurse", "pharmacy", "clinical_governance"],
+            "asset_source": "postgres_uploaded_lookup",
+            "source_table": "uploaded_lookup_rows",
+            "row_count": rows_inserted,
+            "columns": columns,
+            "search_backend": "postgres",
+            "rag_indexed": False,
+        },
+        "chunk_count": 0,
+        "ingestion_status": "metadata_only",
+    }
 
 
 def _tool_flow_from_metadata(metadata: dict[str, object], tools_used: list[str]) -> list[dict[str, object]]:
@@ -399,10 +439,19 @@ async def upload_admin_document(
             raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
         if rows_inserted == 0:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No CSV lookup rows found")
+        content_type = file.content_type or "text/csv"
+        try:
+            document_store = get_document_store()
+            if hasattr(document_store, "upsert_manifest_record"):
+                document_store.upsert_manifest_record(
+                    _csv_manifest_record(filename, data, rows_inserted, content_type)
+                )
+        except Exception as exc:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
         return AdminDocumentUploadResponse(
             key=f"postgres://uploaded_lookup_rows/{filename}",
             uri=f"postgres://uploaded_lookup_rows/{filename}",
-            content_type=file.content_type or "text/csv",
+            content_type=content_type,
             size_bytes=len(data),
         )
     key = _raw_document_key(filename)
@@ -428,6 +477,12 @@ def ingest_admin_documents(
         document_store = get_document_store()
         if hasattr(document_store, "invalidate_manifest_cache"):
             document_store.invalidate_manifest_cache()
+        retrieval_service = get_retrieval_service()
+        if hasattr(retrieval_service, "invalidate_cache"):
+            retrieval_service.invalidate_cache()
+        agent = get_agent()
+        if hasattr(agent, "invalidate_caches"):
+            agent.invalidate_caches()
     except Exception as exc:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
     return AdminIngestionResponse(

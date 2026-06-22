@@ -136,7 +136,17 @@ def chunk_text(text: str, chunk_size: int = 1500, chunk_overlap: int = 250) -> l
         while index < len(text):
             chunks.append(text[index : index + step])
             index += step - overlap
-        return chunks
+    return chunks
+
+
+def is_metadata_only_manifest_record(record: dict[str, Any]) -> bool:
+    metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
+    return (
+        str(record.get("ingestion_status") or "") == "metadata_only"
+        or str(metadata.get("asset_source") or "") == "postgres_uploaded_lookup"
+        or str(record.get("uri") or "").startswith("postgres://")
+        or str(record.get("key") or "").startswith("postgres://")
+    )
 
 
 class IngestionJob:
@@ -155,8 +165,13 @@ class IngestionJob:
         existing_by_key = {
             str(document.get("key", "")): document
             for document in existing_manifest.get("documents", [])
-            if isinstance(document, dict) and document.get("key")
+            if isinstance(document, dict) and document.get("key") and not is_metadata_only_manifest_record(document)
         }
+        metadata_only_documents = [
+            dict(document)
+            for document in existing_manifest.get("documents", [])
+            if isinstance(document, dict) and is_metadata_only_manifest_record(document)
+        ]
         raw_documents = self._load_raw_documents()
         seen_keys: set[str] = set()
         indexed_chunks = 0
@@ -164,7 +179,7 @@ class IngestionJob:
         skipped_documents = 0
         deleted_documents = 0
         deleted_chunks = 0
-        manifest_documents = []
+        manifest_documents = list(metadata_only_documents)
         for raw_document in raw_documents:
             key = raw_document["key"]
             seen_keys.add(key)

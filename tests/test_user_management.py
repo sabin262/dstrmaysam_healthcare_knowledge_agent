@@ -214,6 +214,7 @@ class UserManagementApiTests(unittest.TestCase):
 class FakeDocumentStore:
     def __init__(self):
         self.uploads = []
+        self.manifest_records = []
         self.records = [
             DocumentRecord(
                 title="policy.md",
@@ -228,6 +229,21 @@ class FakeDocumentStore:
 
     def upload_document(self, key: str, data: bytes, content_type: str) -> None:
         self.uploads.append({"key": key, "data": data, "content_type": content_type})
+
+    def upsert_manifest_record(self, record):
+        self.manifest_records.append(record)
+        self.records = [item for item in self.records if item.key != record["key"]]
+        self.records.append(
+            DocumentRecord(
+                title=record["title"],
+                uri=record["uri"],
+                key=record["key"],
+                content_type=record["content_type"],
+                metadata=record["metadata"],
+                chunk_count=record["chunk_count"],
+                ingestion_status=record["ingestion_status"],
+            )
+        )
 
     def list_documents(self):
         return list(self.records)
@@ -355,6 +371,14 @@ class AdminDocumentApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["key"], "postgres://uploaded_lookup_rows/doctor_rota.csv")
         self.assertEqual(self.documents.uploads, [])
+        self.assertEqual(self.documents.manifest_records[0]["key"], "postgres://uploaded_lookup_rows/doctor_rota.csv")
+        self.assertEqual(self.documents.manifest_records[0]["uri"], "postgres://uploaded_lookup_rows/doctor_rota.csv")
+        self.assertEqual(self.documents.manifest_records[0]["chunk_count"], 0)
+        self.assertEqual(self.documents.manifest_records[0]["ingestion_status"], "metadata_only")
+        self.assertEqual(self.documents.manifest_records[0]["metadata"]["asset_source"], "postgres_uploaded_lookup")
+        self.assertEqual(self.documents.manifest_records[0]["metadata"]["row_count"], 1)
+        self.assertEqual(self.documents.manifest_records[0]["metadata"]["columns"], ["date", "doctor"])
+        self.assertFalse(self.documents.manifest_records[0]["metadata"]["rag_indexed"])
         self.assertEqual(self.patient_lookup.uploads[0]["filename"], "doctor_rota.csv")
         self.assertEqual(self.patient_lookup.uploads[0]["data"], b"date,doctor\nToday,Dr Aisha Malik\n")
 

@@ -29,6 +29,7 @@ class AzureOpenAISecrets:
     api_key: str
     api_version: str
     chat_deployment: str
+    fast_chat_deployment: str
     embedding_deployment: str
 
 
@@ -122,6 +123,11 @@ class SecretProvider:
     def load_azure_openai(self) -> AzureOpenAISecrets:
         data = self.get_json(self.settings.azure_openai_secret_name)
         chat_deployment = self.settings.azure_openai_deployment or str(data.get("chat_deployment", ""))
+        fast_chat_deployment = (
+            self.settings.azure_openai_fast_deployment
+            or str(data.get("fast_chat_deployment", ""))
+            or chat_deployment
+        )
         required = ["endpoint", "api_key", "embedding_deployment"]
         missing = [key for key in required if not data.get(key)]
         if not chat_deployment:
@@ -135,6 +141,7 @@ class SecretProvider:
             api_key=str(data["api_key"]),
             api_version=str(data.get("api_version", "2025-04-01-preview")),
             chat_deployment=chat_deployment,
+            fast_chat_deployment=fast_chat_deployment,
             embedding_deployment=str(data["embedding_deployment"]),
         )
 
@@ -233,11 +240,17 @@ class EnvSecretProvider(SecretProvider):
 
     def _azure_secret_from_env(self) -> dict[str, Any]:
         chat_deployment = self.settings.azure_openai_deployment or os.getenv("AZURE_OPENAI_DEPLOYMENT", "")
+        fast_chat_deployment = (
+            self.settings.azure_openai_fast_deployment
+            or os.getenv("AZURE_OPENAI_FAST_DEPLOYMENT", "")
+            or chat_deployment
+        )
         return {
             "endpoint": os.getenv("AZURE_OPENAI_ENDPOINT", ""),
             "api_key": os.getenv("AZURE_OPENAI_API_KEY", ""),
             "api_version": os.getenv("AZURE_OPENAI_API_VERSION", "2025-04-01-preview"),
             "chat_deployment": chat_deployment,
+            "fast_chat_deployment": fast_chat_deployment,
             "embedding_deployment": os.getenv("AZURE_OPENAI_EMBEDDING_DEPLOYMENT", ""),
         }
 
