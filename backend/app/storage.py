@@ -117,6 +117,16 @@ class DocumentStore:
         )
         self.invalidate_manifest_cache()
 
+    @retry_transient
+    def replace_manifest(self, manifest: dict[str, Any]) -> None:
+        self.s3_client.put_object(
+            Bucket=self.settings.s3_bucket,
+            Key=self.settings.s3_manifest_key,
+            Body=json.dumps(manifest, indent=2).encode("utf-8"),
+            ContentType="application/json",
+        )
+        self.invalidate_manifest_cache()
+
     def invalidate_manifest_cache(self) -> None:
         self._manifest_cache = None
         self._manifest_cache_expires_at = 0.0
@@ -191,6 +201,12 @@ class LocalDocumentStore(DocumentStore):
         records.append(dict(record))
         manifest["documents"] = records
         manifest["total_chunks"] = sum(int(item.get("chunk_count") or 0) for item in records)
+        path = self._path_for_key(self.settings.s3_manifest_key)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        self.invalidate_manifest_cache()
+
+    def replace_manifest(self, manifest: dict[str, Any]) -> None:
         path = self._path_for_key(self.settings.s3_manifest_key)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")

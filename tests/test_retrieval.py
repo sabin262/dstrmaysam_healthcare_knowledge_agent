@@ -32,6 +32,7 @@ class FakeOpenSearchClient:
     def __init__(self, responses=None):
         self.search_calls = []
         self.msearch_calls = []
+        self.delete_calls = []
         self.responses = list(responses or [])
 
     def search(self, index, body):
@@ -39,6 +40,12 @@ class FakeOpenSearchClient:
         if self.responses:
             return self.responses.pop(0)
         return {"hits": {"hits": []}}
+
+    def delete_by_query(self, index, body, refresh=True, conflicts="proceed"):
+        self.delete_calls.append(
+            {"index": index, "body": body, "refresh": refresh, "conflicts": conflicts}
+        )
+        return {"deleted": 5}
 
 
 class FakeMSearchOpenSearchClient(FakeOpenSearchClient):
@@ -212,6 +219,24 @@ class RetrievalQueryTests(unittest.TestCase):
 
         self.assertEqual(len(service._opensearch.search_calls), 1)
         self.assertEqual(service.last_timing_ms["cache_hit"], 1)
+
+    def test_delete_all_indexes_uses_match_all_and_clears_cache(self):
+        app_settings = settings(rag_query_cache_ttl_seconds=60)
+        service = RetrievalService(
+            app_settings,
+            StaticSecretProvider(app_settings, {"/test/app": {"session_secret": "secret"}}),
+        )
+        service._opensearch = FakeOpenSearchClient()
+        service._search_cache[("cached",)] = (999999999.0, [], {})
+
+        deleted = service.delete_all_indexes()
+
+        self.assertEqual(deleted, 5)
+        self.assertEqual(
+            service._opensearch.delete_calls[0]["body"],
+            {"query": {"match_all": {}}},
+        )
+        self.assertEqual(service._search_cache, {})
 
 
 if __name__ == "__main__":

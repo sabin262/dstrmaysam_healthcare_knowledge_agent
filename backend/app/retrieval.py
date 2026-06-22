@@ -335,5 +335,23 @@ class RetrievalService:
         self._search_cache.clear()
         self._embedding_cache.clear()
 
+    def delete_all_indexes(self) -> int:
+        if not self.settings.opensearch_endpoint:
+            self.invalidate_cache()
+            return 0
+        client = self._get_opensearch_client()
+        try:
+            response = client.delete_by_query(
+                index=self.settings.opensearch_index,
+                body={"query": {"match_all": {}}},
+                refresh=True,
+                conflicts="proceed",
+            )
+            deleted = int(response.get("deleted") or 0)
+        except Exception:
+            deleted = 0
+        self.invalidate_cache()
+        return deleted
+
     def _normalize_query(self, query: str) -> str:
         return " ".join(query.lower().split())

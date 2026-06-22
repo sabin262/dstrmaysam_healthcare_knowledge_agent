@@ -215,6 +215,7 @@ class FakeDocumentStore:
     def __init__(self):
         self.uploads = []
         self.manifest_records = []
+        self.replaced_manifests = []
         self.records = [
             DocumentRecord(
                 title="policy.md",
@@ -245,6 +246,13 @@ class FakeDocumentStore:
             )
         )
 
+    def replace_manifest(self, manifest):
+        self.replaced_manifests.append(manifest)
+        self.records = []
+
+    def invalidate_manifest_cache(self):
+        pass
+
     def list_documents(self):
         return list(self.records)
 
@@ -256,6 +264,25 @@ class FakeAccess:
 
 class FakeAgent:
     access = FakeAccess()
+
+    def __init__(self):
+        self.invalidated = False
+
+    def invalidate_caches(self):
+        self.invalidated = True
+
+
+class FakeRetrievalService:
+    def __init__(self):
+        self.deleted = False
+        self.invalidated = False
+
+    def delete_all_indexes(self):
+        self.deleted = True
+        return 7
+
+    def invalidate_cache(self):
+        self.invalidated = True
 
 
 class FakeIngestionJob:
@@ -326,14 +353,17 @@ class AdminDocumentApiTests(unittest.TestCase):
         self.documents = FakeDocumentStore()
         self.history = InMemoryChatHistoryRepository()
         self.patient_lookup = FakePatientLookup()
+        self.retrieval = FakeRetrievalService()
+        self.agent = FakeAgent()
         FakeIngestionJob.calls = 0
         self.patches = [
             mock.patch.object(main, "get_auth_service", lambda: self.auth),
             mock.patch.object(main, "get_settings", lambda: self.settings),
             mock.patch.object(main, "get_document_store", lambda: self.documents),
-            mock.patch.object(main, "get_agent", lambda: FakeAgent()),
+            mock.patch.object(main, "get_agent", lambda: self.agent),
             mock.patch.object(main, "get_history_repository", lambda: self.history),
             mock.patch.object(main, "get_deterministic_lookup_service", lambda: self.patient_lookup),
+            mock.patch.object(main, "get_retrieval_service", lambda: self.retrieval),
             mock.patch.object(main, "get_secret_provider", lambda: self.auth.secret_provider),
             mock.patch.object(main, "IngestionJob", FakeIngestionJob),
         ]
@@ -411,6 +441,45 @@ class AdminDocumentApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["indexed_chunks"], 3)
         self.assertEqual(FakeIngestionJob.calls, 1)
+
+    def test_admin_can_delete_all_indexes_with_password_confirmation(self):
+        response = self.client.post(
+            "/admin/documents/delete-indexes",
+            headers=self.headers_for("admin", "adminpass1"),
+            json={"admin_password": "adminpass1"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["deleted_chunks"], 7)
+        self.assertTrue(response.json()["manifest_cleared"])
+        self.assertEqual(response.json()["backend"], "opensearch")
+        self.assertTrue(response.json()["raw_documents_preserved"])
+        self.assertTrue(response.json()["deterministic_lookup_preserved"])
+        self.assertTrue(self.retrieval.deleted)
+        self.assertEqual(self.documents.replaced_manifests[0]["documents"], [])
+        self.assertEqual(self.documents.replaced_manifests[0]["opensearch_index"], "idx")
+        self.assertTrue(self.agent.invalidated)
+
+    def test_delete_all_indexes_rejects_wrong_admin_password(self):
+        response = self.client.post(
+            "/admin/documents/delete-indexes",
+            headers=self.headers_for("admin", "adminpass1"),
+            json={"admin_password": "wrongpass"},
+        )
+
+        self.assertEqual(response.status_code, 401)
+        self.assertFalse(self.retrieval.deleted)
+        self.assertEqual(self.documents.replaced_manifests, [])
+
+    def test_non_admin_cannot_delete_all_indexes(self):
+        response = self.client.post(
+            "/admin/documents/delete-indexes",
+            headers=self.headers_for("staff", "staffpass1"),
+            json={"admin_password": "staffpass1"},
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertFalse(self.retrieval.deleted)
 
     def test_documents_endpoint_returns_chunk_table_fields(self):
         response = self.client.get(

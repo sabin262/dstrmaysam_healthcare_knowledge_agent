@@ -27,6 +27,8 @@ from .local_chroma import LocalChromaIngestionJob, LocalChromaRetrievalService
 from .models import (
     AdminDocumentUploadResponse,
     AdminIngestionResponse,
+    AdminDeleteIndexesRequest,
+    AdminDeleteIndexesResponse,
     AdminPasswordResetRequest,
     AdminUserCreateRequest,
     AdminUserSummary,
@@ -219,6 +221,35 @@ def _csv_manifest_record(filename: str, data: bytes, rows_inserted: int, content
         "chunk_count": 0,
         "ingestion_status": "metadata_only",
     }
+
+
+def _empty_index_manifest() -> dict[str, object]:
+    settings = get_settings()
+    base: dict[str, object] = {
+        "documents": [],
+        "indexed_chunks": 0,
+        "total_chunks": 0,
+        "indexed_documents": 0,
+        "skipped_documents": 0,
+        "deleted_documents": 0,
+        "deleted_chunks": 0,
+    }
+    if settings.use_local_resources():
+        base.update(
+            {
+                "vector_backend": "chroma",
+                "chroma_collection": settings.chroma_collection,
+                "force_reindex": False,
+            }
+        )
+    else:
+        base.update(
+            {
+                "opensearch_index": settings.opensearch_index,
+                "force_reindex": False,
+            }
+        )
+    return base
 
 
 def _tool_flow_from_metadata(metadata: dict[str, object], tools_used: list[str]) -> list[dict[str, object]]:
@@ -465,6 +496,45 @@ async def upload_admin_document(
         uri=f"s3://{get_settings().s3_bucket}/{key}",
         content_type=content_type,
         size_bytes=len(data),
+    )
+
+
+@app.post("/admin/documents/delete-indexes", response_model=AdminDeleteIndexesResponse)
+def delete_admin_document_indexes(
+    request: AdminDeleteIndexesRequest,
+    user: HealthcareUserContext = Depends(admin_user_context),
+) -> AdminDeleteIndexesResponse:
+    try:
+        get_auth_service().verify_user_password(user.user_id, request.admin_password)
+    except AuthenticationError as exc:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)) from exc
+
+    try:
+        retrieval_service = get_retrieval_service()
+        deleted_chunks = 0
+        if hasattr(retrieval_service, "delete_all_indexes"):
+            deleted_chunks = int(retrieval_service.delete_all_indexes())
+        elif hasattr(retrieval_service, "invalidate_cache"):
+            retrieval_service.invalidate_cache()
+
+        document_store = get_document_store()
+        if hasattr(document_store, "replace_manifest"):
+            document_store.replace_manifest(_empty_index_manifest())
+        if hasattr(document_store, "invalidate_manifest_cache"):
+            document_store.invalidate_manifest_cache()
+
+        agent = get_agent()
+        if hasattr(agent, "invalidate_caches"):
+            agent.invalidate_caches()
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+
+    return AdminDeleteIndexesResponse(
+        deleted_chunks=deleted_chunks,
+        manifest_cleared=True,
+        backend="chroma" if get_settings().use_local_resources() else "opensearch",
+        raw_documents_preserved=True,
+        deterministic_lookup_preserved=True,
     )
 
 

@@ -273,6 +273,12 @@ class AuthService:
             raise AuthenticationError("Invalid username or password")
         return self._login_result_for(username)
 
+    def verify_user_password(self, username: str, password: str) -> None:
+        username = username.strip()
+        stored_hash = self._secrets().auth_users.get(username)
+        if not stored_hash or not verify_password(password, stored_hash):
+            raise AuthenticationError("Invalid username or password")
+
     def verify_token(self, token: str) -> str:
         return str(self.verify_token_claims(token)["sub"])
 

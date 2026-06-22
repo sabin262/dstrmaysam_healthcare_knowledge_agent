@@ -282,6 +282,27 @@ class LocalModeTests(unittest.TestCase):
         self.assertTrue(any(hit.metadata.get("document_type") == "policy" for hit in hits))
         self.assertTrue(any(hit.metadata.get("_retrieval_strategy") == "neighbor" for hit in hits))
 
+    def test_local_chroma_delete_all_indexes_clears_collection_ids(self):
+        app_settings = settings()
+        collection = FakeCollection()
+        collection.upsert(
+            ids=["policy:0", "policy:1"],
+            documents=["Policy heading.", "Policy body."],
+            embeddings=[[0.1], [0.2]],
+            metadatas=[
+                {"key": "raw/policy.txt", "title": "policy.txt"},
+                {"key": "raw/policy.txt", "title": "policy.txt"},
+            ],
+        )
+        service = LocalChromaRetrievalService(app_settings, StaticSecretProvider(app_settings, {}))
+        service._collection = collection
+
+        deleted = service.delete_all_indexes()
+
+        self.assertEqual(deleted, 2)
+        self.assertEqual(collection.items, {})
+        self.assertEqual(collection.deleted, ["policy:0", "policy:1"])
+
 
 if __name__ == "__main__":
     unittest.main()

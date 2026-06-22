@@ -355,6 +355,19 @@ class LocalChromaRetrievalService(LocalChromaEmbeddingMixin, LocalChromaCollecti
     def invalidate_cache(self) -> None:
         self._search_cache.clear()
 
+    def delete_all_indexes(self) -> int:
+        collection = self._get_collection()
+        try:
+            existing = collection.get()
+            ids = list(existing.get("ids", []) or [])
+            if ids:
+                collection.delete(ids=ids)
+            deleted = len(ids)
+        except Exception:
+            deleted = 0
+        self.invalidate_cache()
+        return deleted
+
     def _raw_file_keyword_hits(
         self,
         query: str,
