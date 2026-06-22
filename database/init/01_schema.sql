@@ -92,6 +92,16 @@ CREATE TABLE IF NOT EXISTS formulary (
     access_level TEXT NOT NULL DEFAULT 'all_staff'
 );
 
+CREATE TABLE IF NOT EXISTS uploaded_lookup_rows (
+    id BIGSERIAL PRIMARY KEY,
+    source_filename TEXT NOT NULL,
+    row_number INTEGER NOT NULL,
+    row_data JSONB NOT NULL,
+    searchable_text TEXT NOT NULL,
+    access_level TEXT NOT NULL DEFAULT 'all_staff',
+    uploaded_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 CREATE INDEX IF NOT EXISTS idx_patients_name ON patients (lower(full_name));
 CREATE INDEX IF NOT EXISTS idx_patients_mrn ON patients (lower(mrn));
 CREATE INDEX IF NOT EXISTS idx_doctors_name ON doctors (lower(full_name));
@@ -99,3 +109,5 @@ CREATE INDEX IF NOT EXISTS idx_doctors_department ON doctors (lower(department_n
 CREATE INDEX IF NOT EXISTS idx_contacts_department ON organization_contacts (lower(department_name));
 CREATE INDEX IF NOT EXISTS idx_appointments_patient ON appointments (lower(patient_name), lower(patient_mrn));
 CREATE INDEX IF NOT EXISTS idx_formulary_name ON formulary (lower(medicine_name));
+CREATE INDEX IF NOT EXISTS idx_uploaded_lookup_source ON uploaded_lookup_rows (lower(source_filename));
+CREATE INDEX IF NOT EXISTS idx_uploaded_lookup_search ON uploaded_lookup_rows USING gin (to_tsvector('simple', searchable_text));

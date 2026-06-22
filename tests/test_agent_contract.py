@@ -3,6 +3,7 @@ from dataclasses import replace
 from threading import Event
 
 from backend.app.agent import KnowledgeAgent
+from backend.app.agent import _planned_tool_names
 from backend.app.config import AppSettings
 from backend.app.history import InMemoryChatHistoryRepository
 from backend.app.observability import ObservabilityClient
@@ -296,6 +297,12 @@ class AgentContractTests(unittest.TestCase):
 
         self.assertEqual(result.tools_used, ["rag_search"])
         self.assertNotIn("document_catalog", result.tools_used)
+        self.assertEqual(
+            [step["tool"] for step in result.metadata["tool_flow"]],
+            ["document_catalog", "rag_search"],
+        )
+        self.assertFalse(result.metadata["tool_flow"][0]["selected_by_agent"])
+        self.assertEqual(result.metadata["tool_flow"][0]["helper_for"], "rag_search")
 
     def test_document_search_uses_catalog_candidate_keys(self):
         retrieval = FakeRetrieval()
@@ -445,6 +452,29 @@ class AgentContractTests(unittest.TestCase):
             retrieval.calls[-1]["document_keys"],
             ["raw/leave.md"],
         )
+
+    def test_policy_question_with_patient_keyword_uses_rag_plan(self):
+        self.assertEqual(_planned_tool_names("What is the patient privacy policy?"), ["rag_search"])
+
+    def test_multipart_policy_and_on_call_question_uses_two_tools(self):
+        self.assertEqual(
+            _planned_tool_names(
+                "I need information on the patient privacy policy and also which doctors are on call today?"
+            ),
+            ["rag_search", "postgres_deterministic_lookup"],
+        )
+
+    def test_multipart_offline_answer_runs_rag_and_deterministic_lookup(self):
+        agent = make_agent()
+
+        result = agent.answer(
+            "user",
+            "I need information on the patient privacy policy and also which doctors are on call today?",
+            session_id="session",
+        )
+
+        self.assertEqual(result.tools_used, ["rag_search", "postgres_deterministic_lookup"])
+        self.assertEqual(result.metadata["performance"]["agent_mode"], "offline_multi_tool")
 
     def test_response_guardrail_uses_extra_llm_call_to_rewrite_answer(self):
         fake_llm = FakeLLM(

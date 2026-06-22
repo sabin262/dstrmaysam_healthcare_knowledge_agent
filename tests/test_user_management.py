@@ -260,6 +260,13 @@ class FakeIngestionJob:
 class FakePatientLookup:
     def __init__(self):
         self.calls = []
+        self.uploads = []
+
+    def ingest_uploaded_csv(self, filename, data, access_level="all_staff"):
+        self.uploads.append(
+            {"filename": filename, "data": data, "access_level": access_level}
+        )
+        return 1
 
     def patient_dashboard(self, **kwargs):
         self.calls.append(kwargs)
@@ -338,6 +345,19 @@ class AdminDocumentApiTests(unittest.TestCase):
         self.assertEqual(self.documents.uploads[0]["key"], "raw/Clinical_Policy.md")
         self.assertEqual(self.documents.uploads[0]["data"], b"# Policy")
 
+    def test_admin_csv_upload_goes_to_postgres_lookup_not_raw_documents(self):
+        response = self.client.post(
+            "/admin/documents/upload",
+            headers=self.headers_for("admin", "adminpass1"),
+            files={"file": ("doctor_rota.csv", b"date,doctor\nToday,Dr Aisha Malik\n", "text/csv")},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["key"], "postgres://uploaded_lookup_rows/doctor_rota.csv")
+        self.assertEqual(self.documents.uploads, [])
+        self.assertEqual(self.patient_lookup.uploads[0]["filename"], "doctor_rota.csv")
+        self.assertEqual(self.patient_lookup.uploads[0]["data"], b"date,doctor\nToday,Dr Aisha Malik\n")
+
     def test_non_admin_cannot_upload_document(self):
         response = self.client.post(
             "/admin/documents/upload",
@@ -403,6 +423,21 @@ class AdminDocumentApiTests(unittest.TestCase):
                     "model": "gpt-4.1-mini",
                     "sources": [{"uri": "s3://bucket/raw/policy.md"}],
                     "source_document_keys": ["raw/policy.md"],
+                    "catalog_guidance": [
+                        {
+                            "tool": "rag_search",
+                            "query": "What is the leave policy?",
+                            "candidate_keys": ["raw/policy.md"],
+                            "candidate_count": 1,
+                            "catalog_filter_applied": True,
+                            "fallback_to_broad_search": False,
+                            "timing_ms": {
+                                "catalog_ms": 3,
+                                "retrieval_search_ms": 15,
+                                "returned_hits": 1,
+                            },
+                        }
+                    ],
                     "ragas": {
                         "ragas_faithfulness": 0.8,
                         "ragas_answer_relevancy": 0.7,
@@ -432,10 +467,15 @@ class AdminDocumentApiTests(unittest.TestCase):
         self.assertEqual(payload["summary"]["avg_total_tokens"], 16)
         self.assertEqual(payload["summary"]["ragas"]["ragas_faithfulness"], 0.8)
         self.assertEqual(payload["summary"]["tool_counts"]["rag_search"], 1)
+        self.assertEqual(payload["summary"]["tool_flow_counts"]["document_catalog"], 1)
+        self.assertEqual(payload["summary"]["tool_flow_counts"]["rag_search"], 1)
         self.assertEqual(payload["summary"]["model_counts"]["gpt-4.1-mini"], 1)
         self.assertEqual(payload["queries"][0]["user_id"], "staff")
         self.assertEqual(payload["queries"][0]["trace_id"], "trace-123")
         self.assertEqual(payload["queries"][0]["total_tokens"], 16)
+        self.assertEqual(payload["queries"][0]["tool_flow_summary"], "document_catalog -> rag_search")
+        self.assertEqual(payload["queries"][0]["tool_flow"][0]["tool"], "document_catalog")
+        self.assertEqual(payload["queries"][0]["tool_flow"][0]["helper_for"], "rag_search")
         self.assertEqual(payload["queries"][0]["ragas"]["ragas_answer_relevancy"], 0.7)
         self.assertTrue(payload["queries"][0]["langfuse_ragas_published"])
         self.assertEqual(payload["queries"][0]["source_document_keys"], ["raw/policy.md"])

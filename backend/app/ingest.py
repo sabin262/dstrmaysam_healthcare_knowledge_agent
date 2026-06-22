@@ -248,7 +248,7 @@ class IngestionJob:
                 key = item["Key"]
                 if key.endswith("/"):
                     continue
-                if not key.lower().endswith((".pdf", ".docx", ".txt", ".md", ".csv")):
+                if not key.lower().endswith((".pdf", ".docx", ".txt", ".md")):
                     continue
                 body = self.s3.get_object(Bucket=self.settings.s3_bucket, Key=key)["Body"].read()
                 documents.append({"key": key, "body": body})

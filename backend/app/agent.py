@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import threading
 import time
 import uuid
@@ -95,6 +96,52 @@ GUARDRAIL_DRAFT_RISK_TERMS = (
     "my friend",
     "buddy",
 )
+POLICY_QUERY_MARKERS = {
+    "policy",
+    "policies",
+    "procedure",
+    "procedures",
+    "sop",
+    "guideline",
+    "guidelines",
+    "pathway",
+    "privacy",
+    "confidentiality",
+    "data protection",
+    "governance",
+    "safeguarding",
+    "escalation policy",
+}
+DETERMINISTIC_QUERY_MARKERS = {
+    "doctor",
+    "physician",
+    "consultant",
+    "on call",
+    "on-call",
+    "contact",
+    "phone",
+    "email",
+    "department",
+    "ward",
+    "patient",
+    "mrn",
+    "nhs",
+    "appointment",
+    "clinic",
+    "medicine",
+    "drug",
+    "formulary",
+    "restricted",
+    "rota",
+    "shift",
+    "schedule",
+    "today",
+    "tomorrow",
+}
+MULTIPART_QUERY_PATTERN = re.compile(
+    r"\b(?:and also|also|as well as|plus)\b|[?]\s+(?=\w)",
+    flags=re.IGNORECASE,
+)
 
 
 def estimate_tokens(text: str) -> int:
@@ -165,6 +212,47 @@ def _needs_llm_response_guardrail(query: str, answer: str) -> bool:
         or any(term in lowered_answer for term in GUARDRAIL_DRAFT_RISK_TERMS)
         or _contains_emoji(answer)
     )
+
+
+def _query_parts(query: str) -> list[str]:
+    parts = [
+        part.strip(" .?\n\t")
+        for part in MULTIPART_QUERY_PATTERN.split(query)
+        if part and part.strip(" .?\n\t")
+    ]
+    return parts or [query.strip()]
+
+
+def _contains_marker(text: str, markers: set[str]) -> bool:
+    lowered = text.lower()
+    return any(marker in lowered for marker in markers)
+
+
+def _has_policy_intent(text: str) -> bool:
+    return _contains_marker(text, POLICY_QUERY_MARKERS)
+
+
+def _has_deterministic_intent(text: str) -> bool:
+    return _contains_marker(text, DETERMINISTIC_QUERY_MARKERS)
+
+
+def _planned_tool_names(query: str) -> list[str]:
+    planned: list[str] = []
+    for part in _query_parts(query):
+        if _has_policy_intent(part):
+            tool = "rag_search"
+        elif _has_deterministic_intent(part):
+            tool = "postgres_deterministic_lookup"
+        else:
+            tool = "rag_search"
+        if tool not in planned:
+            planned.append(tool)
+
+    if _has_policy_intent(query) and "rag_search" not in planned:
+        planned.insert(0, "rag_search")
+    if _has_deterministic_intent(query) and not _has_policy_intent(query) and "postgres_deterministic_lookup" not in planned:
+        planned.append("postgres_deterministic_lookup")
+    return planned or ["rag_search"]
 
 
 def _message_text(message: Any) -> str:
@@ -263,6 +351,76 @@ def _source_document_keys(sources: list[dict[str, Any]]) -> list[str]:
             seen.add(key)
             keys.append(key)
     return keys
+
+
+def _tool_flow_from_execution(
+    tools_used: list[str],
+    catalog_guidance: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    flow: list[dict[str, Any]] = []
+    remaining_guidance = list(catalog_guidance)
+    for tool in tools_used:
+        guidance_index = next(
+            (
+                index
+                for index, guidance in enumerate(remaining_guidance)
+                if str(guidance.get("tool") or "") == tool
+            ),
+            None,
+        )
+        if guidance_index is None:
+            flow.append({"tool": tool, "kind": "agent_tool", "selected_by_agent": True})
+            continue
+
+        guidance = remaining_guidance.pop(guidance_index)
+        timing = guidance.get("timing_ms") if isinstance(guidance.get("timing_ms"), dict) else {}
+        flow.append(
+            {
+                "tool": "document_catalog",
+                "kind": "helper_tool",
+                "helper_for": tool,
+                "selected_by_agent": False,
+                "query": guidance.get("query"),
+                "candidate_count": guidance.get("candidate_count", 0),
+                "candidate_keys": guidance.get("candidate_keys", []),
+                "fallback_to_broad_search": guidance.get("fallback_to_broad_search", False),
+                "latency_ms": int(timing.get("catalog_ms", 0)),
+            }
+        )
+        flow.append(
+            {
+                "tool": tool,
+                "kind": "agent_tool",
+                "selected_by_agent": True,
+                "query": guidance.get("query"),
+                "source": "catalog_filtered_retrieval"
+                if guidance.get("catalog_filter_applied")
+                else "broad_retrieval",
+                "candidate_count": guidance.get("candidate_count", 0),
+                "returned_hits": int(timing.get("returned_hits", 0)),
+                "latency_ms": int(timing.get("retrieval_search_ms", 0)),
+            }
+        )
+
+    for guidance in remaining_guidance:
+        tool = str(guidance.get("tool") or "")
+        if not tool:
+            continue
+        timing = guidance.get("timing_ms") if isinstance(guidance.get("timing_ms"), dict) else {}
+        flow.append(
+            {
+                "tool": "document_catalog",
+                "kind": "helper_tool",
+                "helper_for": tool,
+                "selected_by_agent": False,
+                "query": guidance.get("query"),
+                "candidate_count": guidance.get("candidate_count", 0),
+                "candidate_keys": guidance.get("candidate_keys", []),
+                "fallback_to_broad_search": guidance.get("fallback_to_broad_search", False),
+                "latency_ms": int(timing.get("catalog_ms", 0)),
+            }
+        )
+    return flow
 
 
 def _make_system_message(content: str) -> Any:
@@ -401,6 +559,7 @@ class KnowledgeAgent:
                 sources = graph_result.sources
                 tools_used = graph_result.tools_used
                 catalog_guidance = graph_result.catalog_guidance
+                tool_flow = _tool_flow_from_execution(tools_used, catalog_guidance)
                 performance.update(graph_result.performance)
                 answer = self._apply_llm_response_guardrail(
                     query=safe_query,
@@ -421,7 +580,9 @@ class KnowledgeAgent:
                     "model": self.settings.azure_openai_deployment or "unknown",
                     "prompt_label": self.settings.prompt_label,
                     "tools_used": tools_used,
+                    "tool_flow": tool_flow,
                     "tool_count": len(tools_used),
+                    "tool_flow_count": len(tool_flow),
                     "source_count": len(sources),
                     "source_document_keys": _source_document_keys(sources),
                     "guardrail_applied": bool(performance.get("response_guardrail_applied")),
@@ -447,6 +608,7 @@ class KnowledgeAgent:
                     metadata={
                         "sources": sources,
                         "tools_used": tools_used,
+                        "tool_flow": tool_flow,
                         "input_tokens": input_tokens,
                         "output_tokens": output_tokens,
                         "latency_ms": latency_ms,
@@ -484,6 +646,7 @@ class KnowledgeAgent:
                     output={"answer": answer, "sources": sources},
                     metadata={
                         "tools_used": tools_used,
+                        "tool_flow": tool_flow,
                         "input_tokens": input_tokens,
                         "output_tokens": output_tokens,
                         "latency_ms": latency_ms,
@@ -521,6 +684,7 @@ class KnowledgeAgent:
                 "phi_redaction": redaction.findings,
                 "audit_event": audit_event,
                 "catalog_guidance": catalog_guidance,
+                "tool_flow": tool_flow,
                 "llm_error": self._llm_error,
                 **trace_metadata,
                 "performance": performance,
@@ -804,6 +968,7 @@ class KnowledgeAgent:
         query: str,
         initial_safety: dict[str, Any],
     ) -> str:
+        planned_tools = _planned_tool_names(query)
         return (
             "Conversation history:\n"
             f"{history_context}\n\n"
@@ -811,6 +976,13 @@ class KnowledgeAgent:
             f"{json.dumps(initial_safety, indent=2)}\n\n"
             "User question:\n"
             f"{query}\n\n"
+            "Tool selection plan:\n"
+            f"{json.dumps(planned_tools)}\n\n"
+            "Tool selection rules:\n"
+            "- Use RAG document search for policy, procedure, SOP, guideline, privacy, confidentiality, and governance questions.\n"
+            "- Use deterministic Postgres lookup for exact structured facts such as doctors on call, patients, appointments, wards, contacts, departments, and formulary rows.\n"
+            "- If a multipart question needs more than one tool, call every relevant tool and combine the results into one answer.\n"
+            "- Do not choose deterministic lookup just because a policy question contains words such as patient or department.\n\n"
             "Use tools when they can improve factual accuracy. "
             "Answer with citations when sources are present."
         )
@@ -897,6 +1069,33 @@ class KnowledgeAgent:
         self, *, query: str, user_context: HealthcareUserContext
     ) -> GraphAgentResult:
         started = time.perf_counter()
+        planned_tools = _planned_tool_names(query)
+        if len(planned_tools) > 1:
+            all_sources: list[dict[str, Any]] = []
+            all_guidance: list[dict[str, Any]] = []
+            tool_outputs: list[str] = []
+            for tool_name in planned_tools:
+                tool_output, sources, catalog_guidance = self._run_graph_tool(
+                    tool_name, query, user_context
+                )
+                all_sources.extend(sources)
+                all_guidance.extend(catalog_guidance)
+                tool_outputs.append(f"{tool_name} results:\n{tool_output}")
+            tool_context = "\n\n".join(tool_outputs)
+            performance: dict[str, Any] = {
+                "agent_mode": "offline_multi_tool",
+                "agent_execution_ms": _elapsed_ms(started),
+            }
+            _add_tool_timing(performance, all_guidance)
+            return GraphAgentResult(
+                answer=self._offline_answer(query=query, tool_context=tool_context),
+                sources=_dedupe_sources(all_sources),
+                tools_used=planned_tools,
+                tool_context=tool_context,
+                catalog_guidance=all_guidance,
+                performance=performance,
+            )
+
         offline_tool = self._offline_tool_for_query(query)
         if offline_tool:
             tool_output, sources, catalog_guidance = self._run_graph_tool(
@@ -931,29 +1130,8 @@ class KnowledgeAgent:
         )
 
     def _offline_tool_for_query(self, query: str) -> str | None:
-        lowered = query.lower()
-        deterministic_markers = {
-            "doctor",
-            "physician",
-            "consultant",
-            "on call",
-            "on-call",
-            "contact",
-            "phone",
-            "email",
-            "department",
-            "ward",
-            "patient",
-            "mrn",
-            "nhs",
-            "appointment",
-            "clinic",
-            "medicine",
-            "drug",
-            "formulary",
-            "restricted",
-        }
-        if any(marker in lowered for marker in deterministic_markers):
+        planned_tools = _planned_tool_names(query)
+        if planned_tools == ["postgres_deterministic_lookup"]:
             return "postgres_deterministic_lookup"
         return None
 
@@ -963,33 +1141,7 @@ class KnowledgeAgent:
         terms = [term for term in query.split() if len(term.strip(".,?!:;()[]{}")) >= 3]
         if len(terms) < self.settings.chat_fast_rag_min_query_terms:
             return False
-        lowered = query.lower()
-        non_rag_markers = {
-            "calendar",
-            "rota",
-            "shift",
-            "formulary",
-            "drug",
-            "dose",
-            "dosage",
-            "table",
-            "csv",
-            "row",
-            "patient",
-            "mrn",
-            "nhs",
-            "doctor",
-            "physician",
-            "consultant",
-            "department",
-            "contact",
-            "phone",
-            "email",
-            "appointment",
-            "clinic",
-            "ward",
-        }
-        return not any(marker in lowered for marker in non_rag_markers)
+        return _planned_tool_names(query) == ["rag_search"]
 
     def _call_fast_rag_agent(
         self,
@@ -1205,6 +1357,30 @@ class KnowledgeAgent:
         return self._llm
 
     def _offline_answer(self, *, query: str, tool_context: str) -> str:
+        if (
+            "rag_search results:" in tool_context
+            and "postgres_deterministic_lookup results:" in tool_context
+        ):
+            rag_context = tool_context.split("rag_search results:", 1)[-1].split(
+                "postgres_deterministic_lookup results:", 1
+            )[0].strip()
+            lookup_context = tool_context.split("postgres_deterministic_lookup results:", 1)[-1].strip()
+            lookup_answer = self._offline_answer(
+                query=query,
+                tool_context="postgres_deterministic_lookup results:\n" + lookup_context,
+            )
+            rag_answer = (
+                "Policy/document context:\n"
+                f"{rag_context[:1200]}"
+                if rag_context and "No relevant document chunks found." not in rag_context
+                else "Policy/document context: no relevant document chunks found."
+            )
+            return (
+                "I used both document search and deterministic lookup for this multipart question.\n\n"
+                f"{rag_answer}\n\n"
+                f"{lookup_answer}"
+            )
+
         if tool_context.startswith("postgres_deterministic_lookup results:"):
             payload_text = tool_context.split("postgres_deterministic_lookup results:", 1)[-1].strip()
             try:

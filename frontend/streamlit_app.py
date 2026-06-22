@@ -335,11 +335,11 @@ def render_admin_dashboard() -> None:
 
     st.divider()
     chart_columns = st.columns(3)
-    tool_rows = count_rows(summary.get("tool_counts") or {}, "Tool")
+    tool_rows = count_rows(summary.get("tool_flow_counts") or summary.get("tool_counts") or {}, "Tool")
     user_rows = count_rows(summary.get("user_counts") or {}, "User")
     model_rows = count_rows(summary.get("model_counts") or {}, "Model")
     with chart_columns[0]:
-        st.subheader("Tools")
+        st.subheader("Tool flow")
         if tool_rows:
             st.bar_chart(tool_rows, x="Tool", y="Count")
         else:
@@ -369,6 +369,7 @@ def render_admin_dashboard() -> None:
                 "Query": item.get("query", ""),
                 "Model": item.get("model", ""),
                 "Tools": ", ".join(tools),
+                "Flow": item.get("tool_flow_summary") or " -> ".join(tools),
                 "Sources": item.get("source_count", 0),
                 "Tokens": item.get("total_tokens", 0),
                 "Latency ms": item.get("latency_ms", 0),
@@ -405,6 +406,7 @@ def render_admin_dashboard() -> None:
             st.json(
                 {
                     "tools_used": item.get("tools_used", []),
+                    "tool_flow": item.get("tool_flow", []),
                     "source_document_keys": item.get("source_document_keys", []),
                     "agent_mode": item.get("agent_mode"),
                     "ragas": item.get("ragas", {}),

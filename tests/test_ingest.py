@@ -208,6 +208,24 @@ class IncrementalIngestionTests(unittest.TestCase):
         self.assertEqual(result["documents"], [])
         self.assertEqual(opensearch.deletes[0]["body"], {"query": {"term": {"key": "raw/removed.md"}}})
 
+    def test_csv_files_are_not_indexed_for_rag(self):
+        opensearch = FakeOpenSearch()
+        job = make_job(
+            FakeS3(
+                {
+                    "raw/doctor_rota.csv": b"date,doctor\nToday,Dr Aisha Malik\n",
+                    "raw/privacy_policy.md": b"# Patient privacy policy",
+                }
+            ),
+            opensearch,
+        )
+
+        result = job.run()
+
+        self.assertEqual(result["indexed_documents"], 1)
+        self.assertEqual(result["documents"][0]["key"], "raw/privacy_policy.md")
+        self.assertEqual(opensearch.indexes[0]["body"]["key"], "raw/privacy_policy.md")
+
 
 if __name__ == "__main__":
     unittest.main()
