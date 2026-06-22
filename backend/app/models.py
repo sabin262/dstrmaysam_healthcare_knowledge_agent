@@ -19,6 +19,13 @@ class LoginResponse(BaseModel):
     password_change_required: bool = False
 
 
+class AuthUserResponse(BaseModel):
+    username: str
+    roles: list[str] = Field(default_factory=list)
+    departments: list[str] = Field(default_factory=list)
+    password_change_required: bool = False
+
+
 class ChangePasswordRequest(BaseModel):
     current_password: str = Field(min_length=1)
     new_password: str = Field(min_length=1)
