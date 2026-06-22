@@ -236,6 +236,13 @@ class FakeIngestionJob:
 class FakePatientLookup:
     def __init__(self):
         self.calls = []
+        self.uploads = []
+
+    def ingest_uploaded_csv(self, filename, data, access_level="all_staff"):
+        self.uploads.append(
+            {"filename": filename, "data": data, "access_level": access_level}
+        )
+        return 1
 
     def patient_dashboard(self, **kwargs):
         self.calls.append(kwargs)
@@ -313,6 +320,19 @@ class AdminDocumentApiTests(unittest.TestCase):
         self.assertEqual(response.json()["key"], "raw/Clinical_Policy.md")
         self.assertEqual(self.documents.uploads[0]["key"], "raw/Clinical_Policy.md")
         self.assertEqual(self.documents.uploads[0]["data"], b"# Policy")
+
+    def test_admin_csv_upload_goes_to_postgres_lookup_not_raw_documents(self):
+        response = self.client.post(
+            "/admin/documents/upload",
+            headers=self.headers_for("admin", "adminpass1"),
+            files={"file": ("doctor_rota.csv", b"date,doctor\nToday,Dr Aisha Malik\n", "text/csv")},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["key"], "postgres://uploaded_lookup_rows/doctor_rota.csv")
+        self.assertEqual(self.documents.uploads, [])
+        self.assertEqual(self.patient_lookup.uploads[0]["filename"], "doctor_rota.csv")
+        self.assertEqual(self.patient_lookup.uploads[0]["data"], b"date,doctor\nToday,Dr Aisha Malik\n")
 
     def test_non_admin_cannot_upload_document(self):
         response = self.client.post(

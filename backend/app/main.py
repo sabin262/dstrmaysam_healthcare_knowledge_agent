@@ -322,6 +322,19 @@ async def upload_admin_document(
     data = await file.read()
     if not data:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Uploaded file is empty")
+    if filename.lower().endswith(".csv"):
+        try:
+            rows_inserted = get_deterministic_lookup_service().ingest_uploaded_csv(filename, data)
+        except Exception as exc:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+        if rows_inserted == 0:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No CSV lookup rows found")
+        return AdminDocumentUploadResponse(
+            key=f"postgres://uploaded_lookup_rows/{filename}",
+            uri=f"postgres://uploaded_lookup_rows/{filename}",
+            content_type=file.content_type or "text/csv",
+            size_bytes=len(data),
+        )
     key = _raw_document_key(filename)
     content_type = file.content_type or "application/octet-stream"
     try:

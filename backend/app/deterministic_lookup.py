@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import csv
+import io
 import re
 from dataclasses import dataclass
 from typing import Any, Sequence
@@ -109,6 +111,8 @@ class DeterministicLookupService:
         scopes = _access_scopes(user)
         try:
             rows = self._lookup_category(category, query, scopes, limit)
+            uploaded_rows = self._query_uploaded_lookup_rows(query, scopes, max(0, limit - len(rows)))
+            rows = rows + uploaded_rows
         except Exception as exc:
             return LookupResult(
                 category,
@@ -119,6 +123,71 @@ class DeterministicLookupService:
 
         message = "No matching rows found." if not rows else f"Found {len(rows)} matching row(s)."
         return LookupResult(category, rows, scopes, message)
+
+    def ingest_uploaded_csv(
+        self,
+        filename: str,
+        data: bytes,
+        access_level: str = "all_staff",
+    ) -> int:
+        decoded = data.decode("utf-8-sig", errors="replace")
+        reader = csv.DictReader(io.StringIO(decoded))
+        if not reader.fieldnames:
+            return 0
+
+        rows: list[tuple[str, int, str, str, str]] = []
+        for row_number, row in enumerate(reader, start=1):
+            cleaned = {
+                str(key).strip(): str(value).strip()
+                for key, value in row.items()
+                if key is not None and value is not None and str(value).strip()
+            }
+            if not cleaned:
+                continue
+            searchable_text = " ".join([filename, *cleaned.keys(), *cleaned.values()]).lower()
+            rows.append(
+                (
+                    filename,
+                    row_number,
+                    json.dumps(cleaned, ensure_ascii=False),
+                    searchable_text,
+                    access_level,
+                )
+            )
+
+        if not rows:
+            return 0
+
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                self._ensure_uploaded_lookup_table(cur)
+                cur.execute("DELETE FROM uploaded_lookup_rows WHERE source_filename = %s", (filename,))
+                cur.executemany(
+                    """
+                    INSERT INTO uploaded_lookup_rows
+                        (source_filename, row_number, row_data, searchable_text, access_level)
+                    VALUES (%s, %s, %s::jsonb, %s, %s)
+                    """,
+                    rows,
+                )
+            conn.commit()
+        return len(rows)
+
+    @staticmethod
+    def _ensure_uploaded_lookup_table(cur) -> None:
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS uploaded_lookup_rows (
+                id BIGSERIAL PRIMARY KEY,
+                source_filename TEXT NOT NULL,
+                row_number INTEGER NOT NULL,
+                row_data JSONB NOT NULL,
+                searchable_text TEXT NOT NULL,
+                access_level TEXT NOT NULL DEFAULT 'all_staff',
+                uploaded_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+            """
+        )
 
     def _connect(self):
         try:
@@ -160,6 +229,53 @@ class DeterministicLookupService:
                 if category == "formulary":
                     return self._query_formulary(cur, terms, scopes, limit)
                 return self._query_directory(cur, primary, scopes, limit)
+
+    def _query_uploaded_lookup_rows(
+        self,
+        query: str,
+        scopes: tuple[str, ...],
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        if limit <= 0:
+            return []
+        terms = [term for term in _terms(query) if term not in STOPWORDS]
+        if not terms:
+            return []
+        patterns = [_like(term) for term in terms[:8]]
+        where = " OR ".join(["lower(searchable_text) LIKE %s" for _ in patterns])
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                self._ensure_uploaded_lookup_table(cur)
+                cur.execute(
+                    f"""
+                    SELECT source_filename, row_number, row_data, access_level
+                    FROM uploaded_lookup_rows
+                    WHERE {self._access_sql()}
+                      AND ({where})
+                    ORDER BY source_filename, row_number
+                    LIMIT %s
+                    """,
+                    (list(scopes), *patterns, limit),
+                )
+                rows = []
+                for row in cur.fetchall():
+                    row_dict = dict(row)
+                    payload = row_dict.get("row_data")
+                    if isinstance(payload, str):
+                        try:
+                            payload = json.loads(payload)
+                        except json.JSONDecodeError:
+                            payload = {"value": payload}
+                    rows.append(
+                        {
+                            "source_table": "uploaded_lookup_rows",
+                            "source_filename": row_dict.get("source_filename"),
+                            "row_number": row_dict.get("row_number"),
+                            "row": payload,
+                            "access_level": row_dict.get("access_level"),
+                        }
+                    )
+                return rows
 
     def _classify(self, query: str) -> str:
         q = query.lower()

@@ -10,7 +10,7 @@ from .retrieval import RetrievalHit, RetrievalService
 from .secrets import SecretProvider
 
 
-SUPPORTED_LOCAL_EXTENSIONS = (".pdf", ".docx", ".txt", ".md", ".csv")
+SUPPORTED_LOCAL_EXTENSIONS = (".pdf", ".docx", ".txt", ".md")
 
 
 def _local_uri(key: str) -> str:
