@@ -297,6 +297,12 @@ class AgentContractTests(unittest.TestCase):
 
         self.assertEqual(result.tools_used, ["rag_search"])
         self.assertNotIn("document_catalog", result.tools_used)
+        self.assertEqual(
+            [step["tool"] for step in result.metadata["tool_flow"]],
+            ["document_catalog", "rag_search"],
+        )
+        self.assertFalse(result.metadata["tool_flow"][0]["selected_by_agent"])
+        self.assertEqual(result.metadata["tool_flow"][0]["helper_for"], "rag_search")
 
     def test_document_search_uses_catalog_candidate_keys(self):
         retrieval = FakeRetrieval()

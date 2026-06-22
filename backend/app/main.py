@@ -181,6 +181,61 @@ def _raw_document_key(filename: str) -> str:
     return f"{prefix}/{filename}" if prefix else filename
 
 
+def _tool_flow_from_metadata(metadata: dict[str, object], tools_used: list[str]) -> list[dict[str, object]]:
+    existing = metadata.get("tool_flow")
+    if isinstance(existing, list):
+        return [dict(item) for item in existing if isinstance(item, dict)]
+
+    guidance_items = metadata.get("catalog_guidance")
+    remaining_guidance = [dict(item) for item in guidance_items if isinstance(item, dict)] if isinstance(guidance_items, list) else []
+    flow: list[dict[str, object]] = []
+    for tool in tools_used:
+        guidance_index = next(
+            (
+                index
+                for index, guidance in enumerate(remaining_guidance)
+                if str(guidance.get("tool") or "") == tool
+            ),
+            None,
+        )
+        if guidance_index is None:
+            flow.append({"tool": tool, "kind": "agent_tool", "selected_by_agent": True})
+            continue
+        guidance = remaining_guidance.pop(guidance_index)
+        timing = guidance.get("timing_ms") if isinstance(guidance.get("timing_ms"), dict) else {}
+        flow.append(
+            {
+                "tool": "document_catalog",
+                "kind": "helper_tool",
+                "helper_for": tool,
+                "selected_by_agent": False,
+                "query": guidance.get("query"),
+                "candidate_count": guidance.get("candidate_count", 0),
+                "candidate_keys": guidance.get("candidate_keys", []),
+                "fallback_to_broad_search": guidance.get("fallback_to_broad_search", False),
+                "latency_ms": int(timing.get("catalog_ms", 0)),
+            }
+        )
+        flow.append(
+            {
+                "tool": tool,
+                "kind": "agent_tool",
+                "selected_by_agent": True,
+                "query": guidance.get("query"),
+                "source": "catalog_filtered_retrieval" if guidance.get("catalog_filter_applied") else "broad_retrieval",
+                "candidate_count": guidance.get("candidate_count", 0),
+                "returned_hits": int(timing.get("returned_hits", 0)),
+                "latency_ms": int(timing.get("retrieval_search_ms", 0)),
+            }
+        )
+    return flow
+
+
+def _tool_flow_summary(tool_flow: list[dict[str, object]]) -> str:
+    names = [str(item.get("tool") or "") for item in tool_flow if isinstance(item, dict) and item.get("tool")]
+    return " -> ".join(names)
+
+
 def current_user_context(
     credentials: HTTPAuthorizationCredentials | None = Depends(security),
 ) -> HealthcareUserContext:
@@ -397,6 +452,7 @@ def admin_dashboard(
     interactions = get_history_repository().list_recent_interactions(limit=limit)
     rows: list[dict[str, object]] = []
     tool_counts: dict[str, int] = {}
+    tool_flow_counts: dict[str, int] = {}
     user_counts: dict[str, int] = {}
     model_counts: dict[str, int] = {}
     latencies: list[int] = []
@@ -416,6 +472,7 @@ def admin_dashboard(
         metadata = interaction.metadata or {}
         performance = metadata.get("performance") if isinstance(metadata.get("performance"), dict) else {}
         tools_used = [str(tool) for tool in metadata.get("tools_used", [])]
+        tool_flow = _tool_flow_from_metadata(metadata, tools_used)
         sources = metadata.get("sources", []) if isinstance(metadata.get("sources"), list) else []
         latency_ms = int(metadata.get("latency_ms") or performance.get("total_ms") or 0)
         input_token_count = int(metadata.get("input_tokens") or 0)
@@ -447,6 +504,10 @@ def admin_dashboard(
                 pass
         for tool in tools_used:
             tool_counts[tool] = tool_counts.get(tool, 0) + 1
+        for step in tool_flow:
+            tool_name = str(step.get("tool") or "")
+            if tool_name:
+                tool_flow_counts[tool_name] = tool_flow_counts.get(tool_name, 0) + 1
 
         rows.append(
             {
@@ -458,6 +519,8 @@ def admin_dashboard(
                 "trace_id": metadata.get("trace_id"),
                 "model": model,
                 "tools_used": tools_used,
+                "tool_flow": tool_flow,
+                "tool_flow_summary": _tool_flow_summary(tool_flow),
                 "source_count": len(sources),
                 "source_document_keys": metadata.get("source_document_keys", []),
                 "latency_ms": latency_ms,
@@ -488,6 +551,7 @@ def admin_dashboard(
         "avg_sources_per_query": (total_sources / len(rows)) if rows else 0,
         "guardrail_trigger_count": guardrail_count,
         "tool_counts": tool_counts,
+        "tool_flow_counts": tool_flow_counts,
         "user_counts": user_counts,
         "model_counts": model_counts,
         "ragas": {
