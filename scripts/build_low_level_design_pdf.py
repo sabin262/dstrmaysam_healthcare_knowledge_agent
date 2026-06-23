@@ -165,7 +165,7 @@ def header_footer(canvas, doc):
     width, height = LETTER
     canvas.setFont("Helvetica-Bold", 8)
     canvas.setFillColor(MUTED)
-    canvas.drawString(inch, height - 0.55 * inch, "Dstrmaysam Healthcare Knowledge Agent - Low-Level Design")
+    canvas.drawString(inch, height - 0.55 * inch, "Healthcare Knowledge Agent - Low-Level Design")
     canvas.setStrokeColor(colors.HexColor("#E5E7EB"))
     canvas.setLineWidth(0.5)
     canvas.line(inch, height - 0.64 * inch, width - inch, height - 0.64 * inch)
@@ -258,7 +258,7 @@ def build_story():
     story = []
     story.extend(
         [
-            p("Low-Level Design: Dstrmaysam Healthcare Knowledge Agent Tech Stack", "title"),
+            p("Low-Level Design: Healthcare Knowledge Agent Tech Stack", "title"),
             p(
                 "Detailed implementation-level design covering runtime stack, AWS deployment, external services, agent orchestration, and tool workflows. Generated from the current repository implementation.",
                 "subtitle",
@@ -618,7 +618,7 @@ def build_pdf() -> Path:
         rightMargin=inch,
         topMargin=0.82 * inch,
         bottomMargin=0.78 * inch,
-        title="Low-Level Design: Dstrmaysam Healthcare Knowledge Agent Tech Stack",
+        title="Low-Level Design: Healthcare Knowledge Agent Tech Stack",
         author="Codex",
         subject="Low-level design and workflow diagrams",
     )

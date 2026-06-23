@@ -1,4 +1,4 @@
-# Dstrmaysam Healthcare Knowledge Agent
+# Healthcare Knowledge Agent
 
 This repository implements a containerized internal knowledge assistant MVP with:
 

@@ -1,4 +1,4 @@
-# AWS Setup Instructions: Dstrmaysam Healthcare Knowledge Agent
+# AWS Setup Instructions: Healthcare Knowledge Agent
 
 Version: 1.0  
 Last updated: 2026-06-19  

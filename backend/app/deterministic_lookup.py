@@ -21,6 +21,20 @@ def _like(term: str) -> str:
 
 STOPWORDS = {
     "show",
+    "is",
+    "are",
+    "am",
+    "be",
+    "being",
+    "been",
+    "in",
+    "on",
+    "at",
+    "to",
+    "from",
+    "of",
+    "a",
+    "an",
     "what",
     "which",
     "who",
@@ -48,6 +62,10 @@ STOPWORDS = {
     "medicine",
     "drug",
     "restricted",
+    "ipd",
+    "inpatient",
+    "location",
+    "located",
 }
 
 
@@ -57,6 +75,16 @@ def _best_search_term(terms: list[str]) -> str:
             return term
     useful = [term for term in terms if term.lower() not in STOPWORDS]
     return useful[-1] if useful else (terms[-1] if terms else "")
+
+
+def _has_person_name_hint(terms: list[str]) -> bool:
+    useful = [
+        term
+        for term in terms
+        if term.lower() not in STOPWORDS and not re.fullmatch(r"(w\d+|dep-[a-z0-9-]+|\d+)", term.lower())
+    ]
+    name_like_terms = [term for term in useful if re.fullmatch(r"[a-z][a-z'-]+", term.lower())]
+    return len(name_like_terms) >= 2
 
 
 def _access_scopes(user: HealthcareUserContext) -> tuple[str, ...]:
@@ -279,6 +307,12 @@ class DeterministicLookupService:
 
     def _classify(self, query: str) -> str:
         q = query.lower()
+        terms = _terms(query)
+        patient_location_query = any(
+            marker in q for marker in ["ward", "bed", "ipd", "inpatient", "location", "located", "where"]
+        )
+        if patient_location_query and _has_person_name_hint(terms):
+            return "patients"
         if any(marker in q for marker in ["patient", "mrn", "nhs", "date of birth", "dob"]):
             return "patients"
         if any(marker in q for marker in ["doctor", "physician", "consultant", "clinician"]):
@@ -525,12 +559,14 @@ class DeterministicLookupService:
         pattern = _like(_best_search_term(terms))
         cur.execute(
             f"""
-            SELECT patient_id, mrn, nhs_number, full_name, date_of_birth, ward_code,
-                   department_name, named_consultant, care_status, risk_flags, access_level
-            FROM patients
-            WHERE {self._access_sql()}
-              AND (%s = '%%' OR lower(full_name) LIKE %s OR lower(mrn) LIKE %s OR lower(nhs_number) LIKE %s)
-            ORDER BY full_name
+            SELECT p.patient_id, p.mrn, p.nhs_number, p.full_name, p.date_of_birth, p.ward_code,
+                   w.ward_name, w.floor AS ward_floor, w.nurse_in_charge, w.phone AS ward_phone,
+                   p.department_name, p.named_consultant, p.care_status, p.risk_flags, p.access_level
+            FROM patients p
+            LEFT JOIN wards w ON w.ward_code = p.ward_code
+            WHERE {self._qualified_access_sql("p")}
+              AND (%s = '%%' OR lower(p.full_name) LIKE %s OR lower(p.mrn) LIKE %s OR lower(p.nhs_number) LIKE %s)
+            ORDER BY p.full_name
             LIMIT %s
             """,
             (list(scopes), pattern, pattern, pattern, pattern, limit),

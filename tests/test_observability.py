@@ -83,7 +83,7 @@ class ObservabilityCacheTests(unittest.TestCase):
         prompt, version = observability.system_prompt()
 
         self.assertIsNone(version)
-        self.assertIn("Dstrmaysam Healthcare Knowledge Agent", prompt)
+        self.assertIn("Healthcare Knowledge Agent", prompt)
         self.assertNotIn("Response guardrails:", prompt)
 
     def test_system_prompt_cache_returns_stored_prompt_unchanged(self):

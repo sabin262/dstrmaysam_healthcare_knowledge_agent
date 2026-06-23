@@ -617,6 +617,12 @@ class AgentContractTests(unittest.TestCase):
             ["rag_search", "postgres_deterministic_lookup"],
         )
 
+    def test_ipd_patient_location_question_uses_deterministic_lookup(self):
+        self.assertEqual(
+            _planned_tool_names("where in IPD is Leo Bennett"),
+            ["postgres_deterministic_lookup"],
+        )
+
     def test_multipart_offline_answer_runs_rag_and_deterministic_lookup(self):
         agent = make_agent()
 

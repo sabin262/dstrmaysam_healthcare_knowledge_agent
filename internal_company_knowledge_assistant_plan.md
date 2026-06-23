@@ -1,7 +1,7 @@
-# Dstrmaysam Healthcare Knowledge Agent Plan
+# Healthcare Knowledge Agent Plan
 
 ## Summary
-Build a five-day MVP for the Dstrmaysam Healthcare Knowledge Agent with FastAPI, Streamlit, LangGraph, LangChain integrations, Azure OpenAI, S3, OpenSearch Serverless, Langfuse, RAGAS, AWS Secrets Manager, simple login, persistent chat history, and ECS Fargate deployment.
+Build a five-day MVP for the Healthcare Knowledge Agent with FastAPI, Streamlit, LangGraph, LangChain integrations, Azure OpenAI, S3, OpenSearch Serverless, Langfuse, RAGAS, AWS Secrets Manager, simple login, persistent chat history, and ECS Fargate deployment.
 
 ## Architecture
 ```mermaid

@@ -1,1 +1,1 @@
-"""Dstrmaysam Healthcare Knowledge Agent backend."""
+"""Healthcare Knowledge Agent backend."""

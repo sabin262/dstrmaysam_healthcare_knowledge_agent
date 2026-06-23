@@ -290,7 +290,7 @@ def setup_document() -> Document:
 
     header = section.header.paragraphs[0]
     header.text = ""
-    left = header.add_run("Dstrmaysam Healthcare Knowledge Agent")
+    left = header.add_run("Healthcare Knowledge Agent")
     set_run_font(left, size=9, color=MUTED, bold=True)
     header.alignment = WD_ALIGN_PARAGRAPH.LEFT
 
@@ -308,7 +308,7 @@ def build() -> Path:
     title = doc.add_paragraph()
     title.paragraph_format.space_after = Pt(4)
     title.paragraph_format.keep_with_next = True
-    run = title.add_run("Dstrmaysam Healthcare Knowledge Agent")
+    run = title.add_run("Healthcare Knowledge Agent")
     set_run_font(run, size=24, color=INK, bold=True)
     subtitle = add_para(
         doc,
