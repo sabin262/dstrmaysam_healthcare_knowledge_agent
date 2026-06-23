@@ -22,6 +22,15 @@ CHAT_PROGRESS_MESSAGES = [
     "Checking structured lookup data and indexed documents if needed.",
     "Preparing a concise answer.",
 ]
+DASHBOARD_RANGE_OPTIONS = [
+    ("30mins", "30m"),
+    ("1hr", "1h"),
+    ("3hr", "3h"),
+    ("1 day", "1d"),
+    ("3 days", "3d"),
+    ("7 days", "7d"),
+    ("all time", "all"),
+]
 
 
 def _set_auth_cookie(token: str, max_age_seconds: int) -> None:
@@ -193,6 +202,40 @@ def safe_article_url(article: dict[str, Any]) -> str:
 
 def render_page_title(title: str) -> None:
     st.markdown(f'<div class="hka-page-title">{html.escape(title)}</div>', unsafe_allow_html=True)
+
+
+def inject_chat_layout_css() -> None:
+    st.markdown(
+        """
+        <style>
+        .hka-chat-page-marker {
+            display: none;
+        }
+        section[data-testid="stMain"] div[data-testid="stMainBlockContainer"]:has(.hka-chat-page-marker),
+        div[data-testid="stAppViewContainer"] .main .block-container:has(.hka-chat-page-marker) {
+            min-height: calc(100dvh - 3rem);
+            padding-bottom: 5.25rem !important;
+        }
+        div[data-testid="stMainBlockContainer"]:has(.hka-chat-page-marker) .hka-page-title,
+        div[data-testid="stAppViewContainer"] .main .block-container:has(.hka-chat-page-marker) .hka-page-title {
+            margin-bottom: 0.45rem !important;
+        }
+        div[data-testid="stVerticalBlockBorderWrapper"]:has(.hka-chat-window-marker) {
+            height: max(360px, calc(100dvh - 11.25rem)) !important;
+            max-height: none !important;
+        }
+        div[data-testid="stVerticalBlockBorderWrapper"]:has(.hka-chat-window-marker) > div,
+        div[data-testid="stVerticalBlockBorderWrapper"]:has(.hka-chat-window-marker) div[data-testid="stVerticalBlock"] {
+            height: 100% !important;
+            max-height: none !important;
+        }
+        div[data-testid="stVerticalBlockBorderWrapper"]:has(.hka-chat-window-marker) div[data-testid="stVerticalBlock"] {
+            overflow-y: auto;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def inject_app_theme() -> None:
@@ -740,8 +783,45 @@ def tool_latency_rows(tool_timings: list[Any]) -> list[dict[str, Any]]:
 
 def render_admin_dashboard() -> None:
     render_page_title("Dashboard")
+
+    user_options = ["all"]
     try:
-        payload = get_json("/admin/dashboard?limit=200")
+        users_payload = get_json("/admin/users")
+        if isinstance(users_payload, list):
+            user_options.extend(
+                str(user.get("username"))
+                for user in users_payload
+                if isinstance(user, dict) and user.get("username")
+            )
+    except Exception:
+        pass
+    user_options = list(dict.fromkeys(user_options))
+
+    filter_columns = st.columns([1, 1, 2])
+    range_labels = [label for label, _ in DASHBOARD_RANGE_OPTIONS]
+    selected_range_label = filter_columns[0].selectbox(
+        "Range",
+        range_labels,
+        index=range_labels.index("all time"),
+        key="dashboard_range_filter",
+    )
+    selected_range = dict(DASHBOARD_RANGE_OPTIONS)[selected_range_label]
+    selected_user_label = filter_columns[1].selectbox(
+        "User",
+        ["All users", *[username for username in user_options if username != "all"]],
+        key="dashboard_user_filter",
+    )
+    selected_user = "all" if selected_user_label == "All users" else selected_user_label
+
+    try:
+        payload = get_json(
+            "/admin/dashboard",
+            params={
+                "limit": 500,
+                "range": selected_range,
+                "user_id": selected_user,
+            },
+        )
     except Exception as exc:
         st.error(f"Unable to load dashboard: {exc}")
         return
@@ -1314,6 +1394,8 @@ def scroll_chat_to_latest() -> None:
 
 
 def render_chat_page() -> None:
+    inject_chat_layout_css()
+    st.markdown('<span class="hka-chat-page-marker"></span>', unsafe_allow_html=True)
     render_page_title("Chat")
     pending_query = st.session_state.pop("pending_chat_query", None)
     with st.container(height=620, border=True):

@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-import csv
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 from functools import lru_cache
-import io
 from pathlib import PurePath
 import re
 import threading
@@ -21,9 +20,9 @@ from .auth import (
     UserManagementError,
 )
 from .config import AppSettings
-from .deterministic_lookup import DeterministicLookupService
+from .deterministic_lookup import DeterministicLookupService, build_csv_semantic_metadata
 from .healthcare import HealthcareUserContext
-from .history import create_chat_history_repository
+from .history import PostgresChatHistoryRepository, create_chat_history_repository
 from .ingest import IngestionJob, checksum_bytes
 from .local_chroma import LocalChromaIngestionJob, LocalChromaRetrievalService
 from .models import (
@@ -54,6 +53,23 @@ from .storage import DocumentStore, LocalDocumentStore
 
 
 SUPPORTED_UPLOAD_EXTENSIONS = {".pdf", ".docx", ".txt", ".md", ".csv"}
+DASHBOARD_RANGE_WINDOWS = {
+    "30m": timedelta(minutes=30),
+    "1h": timedelta(hours=1),
+    "3h": timedelta(hours=3),
+    "1d": timedelta(days=1),
+    "3d": timedelta(days=3),
+    "7d": timedelta(days=7),
+}
+DASHBOARD_RANGE_LABELS = {
+    "30m": "30mins",
+    "1h": "1hr",
+    "3h": "3hr",
+    "1d": "1 day",
+    "3d": "3 days",
+    "7d": "7 days",
+    "all": "all time",
+}
 
 
 @lru_cache
@@ -77,6 +93,8 @@ def get_auth_service() -> AuthService:
 @lru_cache
 def get_history_repository():
     settings = get_settings()
+    if settings.use_local_resources():
+        return PostgresChatHistoryRepository(settings)
     return create_chat_history_repository(settings)
 
 
@@ -213,12 +231,8 @@ def _raw_document_key(filename: str) -> str:
 
 
 def _csv_manifest_record(filename: str, data: bytes, rows_inserted: int, content_type: str) -> dict[str, object]:
-    decoded = data.decode("utf-8-sig", errors="replace")
-    try:
-        reader = csv.DictReader(io.StringIO(decoded))
-        columns = [str(column).strip() for column in (reader.fieldnames or []) if str(column).strip()]
-    except Exception:
-        columns = []
+    semantic_metadata = build_csv_semantic_metadata(filename, data)
+    columns = [str(column).strip() for column in semantic_metadata.get("columns") or [] if str(column).strip()]
     key = f"postgres://uploaded_lookup_rows/{filename}"
     return {
         "key": key,
@@ -242,6 +256,9 @@ def _csv_manifest_record(filename: str, data: bytes, rows_inserted: int, content
             "source_table": "uploaded_lookup_rows",
             "row_count": rows_inserted,
             "columns": columns,
+            "semantic_terms": semantic_metadata.get("semantic_terms") or [],
+            "categorical_values": semantic_metadata.get("categorical_values") or {},
+            "sample_values": semantic_metadata.get("sample_values") or [],
             "search_backend": "postgres",
             "rag_indexed": False,
         },
@@ -524,6 +541,32 @@ def _latency_breakdown_summary(latency_breakdown: dict[str, object]) -> str:
     return ", ".join(f"{label} {value} ms" for label, value in values[:3])
 
 
+def _parse_dashboard_datetime(value: str) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _dashboard_cutoff(range_key: str) -> datetime | None:
+    window = DASHBOARD_RANGE_WINDOWS.get(range_key)
+    if window is None:
+        return None
+    return datetime.now(timezone.utc) - window
+
+
+def _dashboard_registered_users() -> list[str]:
+    try:
+        return [managed_user.username for managed_user in get_auth_service().list_users()]
+    except Exception:
+        return []
+
+
 def current_user_context(
     credentials: HTTPAuthorizationCredentials | None = Depends(security),
 ) -> HealthcareUserContext:
@@ -794,9 +837,17 @@ def ingest_admin_documents(
 
 @app.get("/admin/dashboard")
 def admin_dashboard(
-    limit: int = Query(default=100, ge=1, le=500),
+    limit: int = Query(default=500, ge=1, le=2000),
+    range: str = Query(default="all"),
+    user_id: str = Query(default="all"),
     user: HealthcareUserContext = Depends(admin_user_context),
 ) -> dict[str, object]:
+    range_key = range if range in DASHBOARD_RANGE_LABELS else "all"
+    selected_user = user_id.strip() if user_id else "all"
+    registered_users = _dashboard_registered_users()
+    if selected_user != "all" and registered_users and selected_user not in registered_users:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unknown dashboard user filter")
+    cutoff = _dashboard_cutoff(range_key)
     interactions = get_history_repository().list_recent_interactions(limit=limit)
     rows: list[dict[str, object]] = []
     tool_counts: dict[str, int] = {}
@@ -817,6 +868,12 @@ def admin_dashboard(
     total_sources = 0
 
     for interaction in interactions:
+        if selected_user != "all" and interaction.user_id != selected_user:
+            continue
+        if cutoff is not None:
+            created_at = _parse_dashboard_datetime(interaction.created_at)
+            if created_at is None or created_at < cutoff:
+                continue
         metadata = interaction.metadata or {}
         performance = metadata.get("performance") if isinstance(metadata.get("performance"), dict) else {}
         tools_used = [str(tool) for tool in metadata.get("tools_used", [])]
@@ -910,7 +967,20 @@ def admin_dashboard(
             for score_name, values in ragas_values.items()
         },
     }
-    return {"summary": summary, "queries": rows}
+    return {
+        "summary": summary,
+        "queries": rows,
+        "filters": {
+            "range": range_key,
+            "range_label": DASHBOARD_RANGE_LABELS.get(range_key, "all time"),
+            "user_id": selected_user,
+            "available_ranges": [
+                {"value": key, "label": label}
+                for key, label in DASHBOARD_RANGE_LABELS.items()
+            ],
+            "users": registered_users,
+        },
+    }
 
 
 @app.post("/admin/warmup")

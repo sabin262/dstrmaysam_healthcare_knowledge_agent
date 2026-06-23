@@ -208,4 +208,4 @@ class AppSettings:
         }
 
     def use_local_resources(self) -> bool:
-        return self.app_env.strip().lower() in {"local", "test"}
+        return self.local_test_admin_enabled

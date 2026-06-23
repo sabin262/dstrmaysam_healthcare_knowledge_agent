@@ -64,11 +64,17 @@ def _deterministic_csv_assets(
         if str(metadata.get("asset_source") or "") != "postgres_uploaded_lookup":
             continue
         columns = [str(column) for column in metadata.get("columns") or [] if str(column).strip()]
+        semantic_terms = [str(term) for term in metadata.get("semantic_terms") or [] if str(term).strip()]
+        sample_values = [str(value) for value in metadata.get("sample_values") or [] if str(value).strip()]
+        categorical_values = metadata.get("categorical_values") or {}
         assets.append(
             {
                 "filename": record.title or record.key.rsplit("/", 1)[-1],
                 "title": record.title,
                 "columns": columns,
+                "semantic_terms": semantic_terms,
+                "categorical_values": categorical_values,
+                "sample_values": sample_values,
                 "row_count": int(metadata.get("row_count") or 0),
             }
         )
@@ -88,8 +94,10 @@ def _deterministic_tool_description(csv_assets: list[dict[str, Any]]) -> str:
     asset_lines = []
     for asset in csv_assets[:8]:
         columns = ", ".join(asset.get("columns") or [])
+        semantic_terms = ", ".join((asset.get("semantic_terms") or [])[:12])
         asset_lines.append(
-            f"{asset.get('filename')} ({asset.get('row_count', 0)} rows; columns: {columns or 'unknown'})"
+            f"{asset.get('filename')} ({asset.get('row_count', 0)} rows; "
+            f"columns: {columns or 'unknown'}; terms: {semantic_terms or 'unknown'})"
         )
     return base + " Available uploaded CSV lookup assets: " + " | ".join(asset_lines)
 

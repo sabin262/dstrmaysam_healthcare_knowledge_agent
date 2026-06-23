@@ -1,4 +1,5 @@
 import unittest
+from datetime import datetime, timedelta, timezone
 from unittest import mock
 
 from backend.app.auth import AuthService, AuthenticationError, UserManagementError, hash_password
@@ -408,6 +409,9 @@ class AdminDocumentApiTests(unittest.TestCase):
         self.assertEqual(self.documents.manifest_records[0]["metadata"]["asset_source"], "postgres_uploaded_lookup")
         self.assertEqual(self.documents.manifest_records[0]["metadata"]["row_count"], 1)
         self.assertEqual(self.documents.manifest_records[0]["metadata"]["columns"], ["date", "doctor"])
+        self.assertIn("aisha", self.documents.manifest_records[0]["metadata"]["semantic_terms"])
+        self.assertIn("Dr Aisha Malik", self.documents.manifest_records[0]["metadata"]["categorical_values"]["doctor"])
+        self.assertIn("doctor=Dr Aisha Malik", self.documents.manifest_records[0]["metadata"]["sample_values"])
         self.assertFalse(self.documents.manifest_records[0]["metadata"]["rag_indexed"])
         self.assertEqual(self.patient_lookup.uploads[0]["filename"], "doctor_rota.csv")
         self.assertEqual(self.patient_lookup.uploads[0]["data"], b"date,doctor\nToday,Dr Aisha Malik\n")
@@ -594,6 +598,59 @@ class AdminDocumentApiTests(unittest.TestCase):
         self.assertEqual(payload["queries"][0]["ragas"]["ragas_answer_relevancy"], 0.7)
         self.assertTrue(payload["queries"][0]["langfuse_ragas_published"])
         self.assertEqual(payload["queries"][0]["source_document_keys"], ["raw/policy.md"])
+
+    def test_admin_dashboard_filters_by_range_and_user(self):
+        now = datetime.now(timezone.utc)
+        old_time = (now - timedelta(days=2)).isoformat()
+        recent_time = (now - timedelta(minutes=10)).isoformat()
+        self.history.save_message(
+            "staff",
+            "old-session",
+            ChatMessage(role="user", content="Old staff question", created_at=old_time),
+        )
+        self.history.save_message(
+            "staff",
+            "old-session",
+            ChatMessage(role="assistant", content="Old staff answer", created_at=old_time),
+        )
+        self.history.save_message(
+            "admin",
+            "recent-session",
+            ChatMessage(role="user", content="Recent admin question", created_at=recent_time),
+        )
+        self.history.save_message(
+            "admin",
+            "recent-session",
+            ChatMessage(
+                role="assistant",
+                content="Recent admin answer",
+                created_at=recent_time,
+                metadata={"latency_ms": 100, "input_tokens": 2, "output_tokens": 3},
+            ),
+        )
+
+        recent_response = self.client.get(
+            "/admin/dashboard",
+            headers=self.headers_for("admin", "adminpass1"),
+            params={"range": "30m", "user_id": "all"},
+        )
+        self.assertEqual(recent_response.status_code, 200)
+        recent_payload = recent_response.json()
+        self.assertEqual(recent_payload["summary"]["total_queries"], 1)
+        self.assertEqual(recent_payload["queries"][0]["user_id"], "admin")
+        self.assertEqual(recent_payload["filters"]["range"], "30m")
+        self.assertIn("admin", recent_payload["filters"]["users"])
+
+        staff_response = self.client.get(
+            "/admin/dashboard",
+            headers=self.headers_for("admin", "adminpass1"),
+            params={"range": "all", "user_id": "staff"},
+        )
+        self.assertEqual(staff_response.status_code, 200)
+        staff_payload = staff_response.json()
+        self.assertEqual(staff_payload["summary"]["total_queries"], 1)
+        self.assertEqual(staff_payload["queries"][0]["user_id"], "staff")
+        self.assertEqual(staff_payload["filters"]["user_id"], "staff")
 
     def test_admin_patient_details_uses_postgres_lookup_filters(self):
         response = self.client.get(

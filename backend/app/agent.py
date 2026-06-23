@@ -1351,6 +1351,7 @@ class KnowledgeAgent:
             "- Use RAG document search for policy, procedure, SOP, guideline, privacy, confidentiality, and governance questions.\n"
             "- Use deterministic Postgres lookup for exact structured facts such as doctors on call, patients, appointments, wards, contacts, departments, CSV lookup rows, and formulary rows.\n"
             "- If the deterministic lookup result fully answers the question, answer from that result without calling extra tools.\n"
+            "- For rota/date questions, only call a row 'today' when its date equals the lookup result's resolved_today value; otherwise say no matching row was found for today.\n"
             "- If a multipart question needs more than one tool, call every relevant tool and combine the results into one answer.\n"
             f"{multipart_lookup_rule}"
             "- Do not choose deterministic lookup just because a policy question contains words such as patient or department.\n\n"
@@ -1912,6 +1913,18 @@ class KnowledgeAgent:
                 payload = {}
             rows = payload.get("rows") if isinstance(payload, dict) else None
             message = str(payload.get("message") or "") if isinstance(payload, dict) else ""
+            lookup_plan = payload.get("lookup_plan") if isinstance(payload, dict) else {}
+            aggregate_result = lookup_plan.get("aggregate_result") if isinstance(lookup_plan, dict) else None
+            if isinstance(aggregate_result, dict) and aggregate_result.get("type") == "count":
+                matching_rows = aggregate_result.get("matching_rows")
+                sources = aggregate_result.get("source_filenames") or []
+                source_text = ", ".join(str(source) for source in sources) if isinstance(sources, list) else ""
+                return (
+                    "Based on the deterministic database lookup, "
+                    f"I found {matching_rows} matching row(s)"
+                    + (f" in {source_text}." if source_text else ".")
+                    + "\n\nSource: Postgres deterministic lookup."
+                )
             if isinstance(rows, list) and rows:
                 lines = [
                     "Based on the deterministic database lookup, here is the exact matching information:"
