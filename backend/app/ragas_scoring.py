@@ -2,13 +2,18 @@ from __future__ import annotations
 
 import re
 import os
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .config import AppSettings
+    from .secrets import SecretProvider
 
 
 RAGAS_SCORE_NAMES = {
     "faithfulness": "ragas_faithfulness",
     "answer_relevancy": "ragas_answer_relevancy",
     "context_precision": "ragas_context_precision",
+    "llm_context_precision_without_reference": "ragas_context_precision",
     "context_recall": "ragas_context_recall",
 }
 
@@ -33,6 +38,8 @@ def compute_live_ragas_scores(
     question: str,
     answer: str,
     sources: list[dict[str, Any]],
+    settings: "AppSettings | None" = None,
+    secret_provider: "SecretProvider | None" = None,
 ) -> dict[str, Any]:
     contexts = source_contexts(sources)
     if not answer.strip() or not contexts:
@@ -44,9 +51,20 @@ def compute_live_ragas_scores(
         }
 
     try:
-        scores = _compute_with_ragas(question=question, answer=answer, contexts=contexts)
+        scores = _compute_with_ragas(
+            question=question,
+            answer=answer,
+            contexts=contexts,
+            settings=settings,
+            secret_provider=secret_provider,
+        )
         if scores:
-            return {"scores": scores, "status": "scored", "provider": "ragas", "error": None}
+            return {
+                "scores": scores,
+                "status": "scored",
+                "provider": "ragas_azure_openai" if settings and secret_provider else "ragas",
+                "error": None,
+            }
     except Exception as exc:
         fallback = _lexical_fallback_scores(question=question, answer=answer, contexts=contexts)
         return {
@@ -65,20 +83,39 @@ def compute_live_ragas_scores(
     }
 
 
-def _compute_with_ragas(question: str, answer: str, contexts: list[str]) -> dict[str, float]:
+def _compute_with_ragas(
+    question: str,
+    answer: str,
+    contexts: list[str],
+    *,
+    settings: "AppSettings | None" = None,
+    secret_provider: "SecretProvider | None" = None,
+) -> dict[str, float]:
     os.environ.setdefault("GIT_PYTHON_REFRESH", "quiet")
     from datasets import Dataset
     from ragas import evaluate
-    from ragas.metrics import answer_relevancy, faithfulness
+    from ragas.metrics import LLMContextPrecisionWithoutReference, answer_relevancy, faithfulness
 
     dataset = Dataset.from_dict(
         {
-            "question": [question],
-            "answer": [answer],
-            "contexts": [contexts],
+            "user_input": [question],
+            "response": [answer],
+            "retrieved_contexts": [contexts],
         }
     )
-    result = evaluate(dataset, metrics=[faithfulness, answer_relevancy])
+    ragas_llm = None
+    ragas_embeddings = None
+    if settings is not None and secret_provider is not None:
+        ragas_llm, ragas_embeddings = _build_ragas_azure_clients(settings, secret_provider)
+
+    result = evaluate(
+        dataset,
+        metrics=[faithfulness, answer_relevancy, LLMContextPrecisionWithoutReference()],
+        llm=ragas_llm,
+        embeddings=ragas_embeddings,
+        raise_exceptions=True,
+        show_progress=False,
+    )
     rows = result.to_pandas().to_dict(orient="records")
     if not rows:
         return {}
@@ -89,6 +126,36 @@ def _compute_with_ragas(question: str, answer: str, contexts: list[str]) -> dict
         if numeric is not None:
             scores[score_name] = numeric
     return scores
+
+
+def _build_ragas_azure_clients(
+    settings: "AppSettings",
+    secret_provider: "SecretProvider",
+) -> tuple[Any, Any]:
+    os.environ.setdefault("GIT_PYTHON_REFRESH", "quiet")
+    from langchain_openai import AzureChatOpenAI, AzureOpenAIEmbeddings
+    from ragas.embeddings import LangchainEmbeddingsWrapper
+    from ragas.llms import LangchainLLMWrapper
+
+    secrets = secret_provider.load_azure_openai()
+    llm = AzureChatOpenAI(
+        azure_endpoint=secrets.endpoint,
+        api_key=secrets.api_key,
+        api_version=secrets.api_version,
+        azure_deployment=secrets.fast_chat_deployment or secrets.chat_deployment,
+        temperature=0,
+        timeout=60,
+        max_retries=2,
+    )
+    embeddings = AzureOpenAIEmbeddings(
+        azure_endpoint=secrets.endpoint,
+        api_key=secrets.api_key,
+        api_version=secrets.api_version,
+        azure_deployment=secrets.embedding_deployment,
+        timeout=60,
+        max_retries=2,
+    )
+    return LangchainLLMWrapper(llm), LangchainEmbeddingsWrapper(embeddings)
 
 
 def _lexical_fallback_scores(question: str, answer: str, contexts: list[str]) -> dict[str, float]:

@@ -875,6 +875,9 @@ class KnowledgeAgent:
                         "guardrail_applied": trace_metadata["guardrail_applied"],
                         "guardrail_reason": trace_metadata["guardrail_reason"],
                         "performance": performance,
+                        "ragas_status": "pending",
+                        "ragas_provider": None,
+                        "langfuse_ragas_published": False,
                     },
                 )
                 if self.settings.chat_background_history_save_enabled:
@@ -1051,7 +1054,13 @@ class KnowledgeAgent:
         user_id: str,
         session_id: str,
     ) -> None:
-        result = compute_live_ragas_scores(question=question, answer=answer, sources=sources)
+        result = compute_live_ragas_scores(
+            question=question,
+            answer=answer,
+            sources=sources,
+            settings=self.settings,
+            secret_provider=self.secret_provider,
+        )
         scores = {
             key: float(value)
             for key, value in (result.get("scores") or {}).items()

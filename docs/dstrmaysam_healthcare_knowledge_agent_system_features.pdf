@@ -1,0 +1,549 @@
+%PDF-1.4
+%‚„œ”
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [6 0 R 8 0 R 10 0 R 12 0 R 14 0 R 16 0 R] /Count 6 >>
+endobj
+3 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+4 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>
+endobj
+5 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>
+endobj
+6 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R /F2 4 0 R /F3 5 0 R >> >> /Contents 7 0 R >>
+endobj
+7 0 obj
+<< /Length 4177 >>
+stream
+q
+0 0 0 rg
+BT
+/F2 20 Tf
+1 0 0 1 54 720 Tm (Dstrmaysam Healthcare Knowledge Agent) Tj
+/F2 18 Tf
+1 0 0 1 54 694 Tm (System Feature Guide) Tj
+/F1 11 Tf
+1 0 0 1 54 670 Tm (Generated for stakeholder and delivery review) Tj
+/F1 10 Tf
+1 0 0 1 54 650 Tm (Current implementation snapshot: 2026-06-23) Tj
+1 0 0 1 54 691 Tm (This document details the major features, design choices, operational behavior, and) Tj
+1 0 0 1 54 678 Tm (agent workflow of the healthcare knowledge-agent system. It is written for product,) Tj
+1 0 0 1 54 665 Tm (technical, and delivery stakeholders who need a clear view of what the platform does) Tj
+1 0 0 1 54 652 Tm (and why the current architecture supports those capabilities.) Tj
+/F2 16 Tf
+1 0 0 1 54 633 Tm (1. Product Overview) Tj
+ET
+54 625 m 558 625 l S
+BT
+/F1 10 Tf
+1 0 0 1 54 612 Tm (The system is an authenticated healthcare knowledge assistant. It combines document) Tj
+1 0 0 1 54 599 Tm (question answering, structured deterministic lookup, administrator-controlled document) Tj
+1 0 0 1 54 586 Tm (ingestion, patient-detail querying, observability, evaluation metrics, and role-aware) Tj
+1 0 0 1 54 573 Tm (governance into one Streamlit and FastAPI application.) Tj
+1 0 0 1 66 560 Tm (- Primary interface: Streamlit multipage frontend for chat, dashboard, patient) Tj
+1 0 0 1 66 547 Tm (  details, users, and documents.) Tj
+1 0 0 1 66 534 Tm (- Backend API: FastAPI service with authentication, chat orchestration, document) Tj
+1 0 0 1 66 521 Tm (  APIs, admin APIs, and dashboards.) Tj
+1 0 0 1 66 508 Tm (- Agent runtime: LangGraph-based execution with fast planned paths for common RAG) Tj
+1 0 0 1 66 495 Tm (  and deterministic questions.) Tj
+1 0 0 1 66 482 Tm (- Model provider: Azure OpenAI through LangChain OpenAI integrations, allowing) Tj
+1 0 0 1 66 469 Tm (  Azure deployment configuration.) Tj
+1 0 0 1 66 456 Tm (- Retrieval: OpenSearch Serverless in AWS mode and persistent ChromaDB in local) Tj
+1 0 0 1 66 443 Tm (  mode.) Tj
+1 0 0 1 66 430 Tm (- Observability: Langfuse traces, tool flow metadata, latency breakdowns, token) Tj
+1 0 0 1 66 417 Tm (  counts, and RAGAS scores.) Tj
+/F2 13 Tf
+1 0 0 1 54 400 Tm (Why this feature set exists) Tj
+/F1 10 Tf
+1 0 0 1 54 387 Tm (Healthcare knowledge work often mixes policy interpretation, operational lookup, and) Tj
+1 0 0 1 54 374 Tm (document evidence. The system separates those modes intentionally: RAG is used for) Tj
+1 0 0 1 54 361 Tm (narrative document content, deterministic lookup is used for exact database facts, and) Tj
+1 0 0 1 54 348 Tm (dashboards make the quality and latency of each interaction auditable.) Tj
+/F2 16 Tf
+1 0 0 1 54 329 Tm (2. Deployment And Runtime Modes) Tj
+ET
+54 321 m 558 321 l S
+BT
+/F2 13 Tf
+1 0 0 1 54 304 Tm (AWS development mode) Tj
+/F1 10 Tf
+1 0 0 1 66 291 Tm (- Secrets come from AWS Secrets Manager so application credentials, Azure OpenAI) Tj
+1 0 0 1 66 278 Tm (  keys, and Langfuse keys are not hardcoded.) Tj
+1 0 0 1 66 265 Tm (- Documents are uploaded to S3 and indexed into AWS OpenSearch Serverless.) Tj
+1 0 0 1 66 252 Tm (- OpenSearch index creation is checked before indexing/searching; if the index is) Tj
+1 0 0 1 66 239 Tm (  absent, the backend creates a compatible knn_vector mapping.) Tj
+1 0 0 1 66 226 Tm (- Chat history can use the configured deployed history backend, including DynamoDB) Tj
+1 0 0 1 66 213 Tm (  or Postgres depending on configuration.) Tj
+1 0 0 1 66 200 Tm (- ECS task definitions and IAM policies define the deployable container) Tj
+1 0 0 1 66 187 Tm (  environment.) Tj
+/F2 13 Tf
+1 0 0 1 54 170 Tm (Local mode) Tj
+/F1 10 Tf
+1 0 0 1 66 157 Tm (- LOCAL_TEST_ADMIN_ENABLED=true switches the backend to local resources.) Tj
+1 0 0 1 66 144 Tm (- Local files are stored under the project data folder and indexed into persistent) Tj
+1 0 0 1 66 131 Tm (  ChromaDB.) Tj
+1 0 0 1 66 118 Tm (- Secrets are read from .env/local JSON; admin-created users persist to) Tj
+1 0 0 1 66 105 Tm (  data/local_app_secret.json.) Tj
+1 0 0 1 66 92 Tm (- Chat history is persisted in Postgres for local mode so browser refreshes and) Tj
+1 0 0 1 66 79 Tm (  restarts keep conversation history.) Tj
+/F1 8 Tf
+1 0 0 1 522 32 Tm (Page 1) Tj
+ET
+Q
+endstream
+endobj
+8 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R /F2 4 0 R /F3 5 0 R >> >> /Contents 9 0 R >>
+endobj
+9 0 obj
+<< /Length 4130 >>
+stream
+q
+0 0 0 rg
+BT
+/F2 9 Tf
+1 0 0 1 54 760 Tm (Dstrmaysam Healthcare Knowledge Agent - System Feature Guide) Tj
+ET
+54 735 m 558 735 l S
+BT
+/F2 13 Tf
+1 0 0 1 54 718 Tm (Reasoning) Tj
+/F1 10 Tf
+1 0 0 1 54 705 Tm (The split between AWS mode and local mode lets developers work without depending on) Tj
+1 0 0 1 54 692 Tm (cloud services while keeping the deployed path close to production-like AWS) Tj
+1 0 0 1 54 679 Tm (architecture. A single switch reduces environment drift.) Tj
+/F2 16 Tf
+1 0 0 1 54 660 Tm (3. Identity, Roles, And Administration) Tj
+ET
+54 652 m 558 652 l S
+BT
+/F1 10 Tf
+1 0 0 1 66 639 Tm (- Authentication uses bearer tokens issued by the backend after username/password) Tj
+1 0 0 1 66 626 Tm (  login.) Tj
+1 0 0 1 66 613 Tm (- The login response includes username, roles, departments, and) Tj
+1 0 0 1 66 600 Tm (  password_change_required.) Tj
+1 0 0 1 66 587 Tm (- First-login or reset-password users must change password before chat, documents,) Tj
+1 0 0 1 66 574 Tm (  or admin routes are usable.) Tj
+1 0 0 1 66 561 Tm (- Admin APIs create users, update roles/departments, reset passwords, and protect) Tj
+1 0 0 1 66 548 Tm (  the final admin from losing admin role.) Tj
+1 0 0 1 66 535 Tm (- Known roles include admin, staff, doctor, nurse, pharmacy, clinical_governance,) Tj
+1 0 0 1 66 522 Tm (  and manager.) Tj
+1 0 0 1 66 509 Tm (- Departments are normalized for consistent authorization and filtering.) Tj
+/F2 13 Tf
+1 0 0 1 54 492 Tm (Reasoning) Tj
+/F1 10 Tf
+1 0 0 1 54 479 Tm (Role and department claims are kept close to the auth token so the agent, document) Tj
+1 0 0 1 54 466 Tm (filtering, deterministic lookup, and admin APIs can make consistent access decisions.) Tj
+1 0 0 1 54 453 Tm (Forced password change protects temporary-password workflows without needing a full) Tj
+1 0 0 1 54 440 Tm (identity provider integration.) Tj
+/F2 16 Tf
+1 0 0 1 54 421 Tm (4. Document Management And Indexing) Tj
+ET
+54 413 m 558 413 l S
+BT
+/F1 10 Tf
+1 0 0 1 66 400 Tm (- Admins can upload PDF, DOCX, TXT, Markdown, and CSV files.) Tj
+1 0 0 1 66 387 Tm (- Non-CSV documents are stored as raw documents and parsed into chunks for RAG.) Tj
+1 0 0 1 66 374 Tm (- CSV uploads are ingested into Postgres deterministic lookup tables and added to) Tj
+1 0 0 1 66 361 Tm (  the document manifest as metadata-only assets.) Tj
+1 0 0 1 66 348 Tm (- The documents page always shows indexed document table data: file name, key,) Tj
+1 0 0 1 66 335 Tm (  chunks, category, type, status, and URI.) Tj
+1 0 0 1 66 322 Tm (- Admins can trigger ingestion and indexing from the frontend.) Tj
+1 0 0 1 66 309 Tm (- Admins can delete all search/vector indexes after confirming with their admin) Tj
+1 0 0 1 66 296 Tm (  password; uploaded source files and deterministic lookup rows are preserved.) Tj
+1 0 0 1 66 283 Tm (- Incremental indexing skips unchanged files, reindexes changed files, deletes) Tj
+1 0 0 1 66 270 Tm (  removed files, and forces reindex when the configured search index changes.) Tj
+/F2 13 Tf
+1 0 0 1 54 253 Tm (Reasoning) Tj
+/F1 10 Tf
+1 0 0 1 54 240 Tm (The ingestion workflow favors repeatability and operational safety. It avoids) Tj
+1 0 0 1 54 227 Tm (reprocessing unchanged content, keeps CSV deterministic data separate from vector) Tj
+1 0 0 1 54 214 Tm (retrieval, and gives administrators a controlled reset path for search indexes.) Tj
+/F2 16 Tf
+1 0 0 1 54 195 Tm (5. Retrieval And Knowledge Search) Tj
+ET
+54 187 m 558 187 l S
+BT
+/F2 13 Tf
+1 0 0 1 54 170 Tm (Catalog-guided RAG) Tj
+/F1 10 Tf
+1 0 0 1 66 157 Tm (- The document catalog loads manifest metadata and matches query terms against) Tj
+1 0 0 1 66 144 Tm (  title, key, content type, and metadata JSON.) Tj
+1 0 0 1 66 131 Tm (- For rag_search, document_search, and policy_search, the catalog narrows) Tj
+1 0 0 1 66 118 Tm (  candidates before vector/keyword search.) Tj
+1 0 0 1 66 105 Tm (- Candidate keys are limited to reduce search scope and latency.) Tj
+1 0 0 1 66 92 Tm (- Policy search prefers clinical policy, admin policy, compliance, policy, SOP,) Tj
+1 0 0 1 66 79 Tm (  pathway, and guideline documents.) Tj
+/F1 8 Tf
+1 0 0 1 522 32 Tm (Page 2) Tj
+ET
+Q
+endstream
+endobj
+10 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R /F2 4 0 R /F3 5 0 R >> >> /Contents 11 0 R >>
+endobj
+11 0 obj
+<< /Length 4138 >>
+stream
+q
+0 0 0 rg
+BT
+/F2 9 Tf
+1 0 0 1 54 760 Tm (Dstrmaysam Healthcare Knowledge Agent - System Feature Guide) Tj
+ET
+54 735 m 558 735 l S
+BT
+/F1 10 Tf
+1 0 0 1 66 722 Tm (- If no catalog candidates match, the system falls back to broad retrieval to avoid) Tj
+1 0 0 1 66 709 Tm (  false negatives.) Tj
+/F2 13 Tf
+1 0 0 1 54 692 Tm (OpenSearch and ChromaDB) Tj
+/F1 10 Tf
+1 0 0 1 66 679 Tm (- AWS mode uses OpenSearch Serverless with vector plus keyword search.) Tj
+1 0 0 1 66 666 Tm (- Local mode uses persistent ChromaDB with equivalent retrieval contract.) Tj
+1 0 0 1 66 653 Tm (- OpenSearch search uses multi-search where available for vector and keyword) Tj
+1 0 0 1 66 640 Tm (  search.) Tj
+1 0 0 1 66 627 Tm (- Neighbor chunk expansion fetches adjacent chunks to improve answer completeness.) Tj
+1 0 0 1 66 614 Tm (- Query embedding and retrieval result caches reduce repeated-query latency.) Tj
+/F2 13 Tf
+1 0 0 1 54 597 Tm (Reasoning) Tj
+/F1 10 Tf
+1 0 0 1 54 584 Tm (Pure vector search can miss metadata-specific questions, while pure keyword search) Tj
+1 0 0 1 54 571 Tm (misses semantic matches. Combining catalog narrowing, vector search, keyword search,) Tj
+1 0 0 1 54 558 Tm (access filtering, and neighbor expansion improves precision and context coverage.) Tj
+/F2 16 Tf
+1 0 0 1 54 539 Tm (6. Deterministic Lookup And Patient Data) Tj
+ET
+54 531 m 558 531 l S
+BT
+/F1 10 Tf
+1 0 0 1 66 518 Tm (- The Postgres deterministic lookup tool handles exact facts such as doctors on) Tj
+1 0 0 1 66 505 Tm (  call, patients, appointments, wards, contacts, departments, formularies, and) Tj
+1 0 0 1 66 492 Tm (  schedule rows.) Tj
+1 0 0 1 66 479 Tm (- Uploaded CSV lookup files are stored in Postgres as the source of truth.) Tj
+1 0 0 1 66 466 Tm (- CSV files are represented in the document manifest as metadata-only assets so) Tj
+1 0 0 1 66 453 Tm (  administrators can see that they are available.) Tj
+1 0 0 1 66 440 Tm (- The patient details dashboard filters and queries configured Postgres tables,) Tj
+1 0 0 1 66 427 Tm (  including patient and appointment-style data.) Tj
+1 0 0 1 66 414 Tm (- Deterministic answers preserve exact values and return structured rows instead of) Tj
+1 0 0 1 66 401 Tm (  relying on vector similarity.) Tj
+/F2 13 Tf
+1 0 0 1 54 384 Tm (Reasoning) Tj
+/F1 10 Tf
+1 0 0 1 54 371 Tm (Structured healthcare data should not be approximated through embeddings. Postgres) Tj
+1 0 0 1 54 358 Tm (lookup provides precise results, supports filters, and keeps table data queryable) Tj
+1 0 0 1 54 345 Tm (without inflating the vector index.) Tj
+/F2 16 Tf
+1 0 0 1 54 326 Tm (7. Chat Experience) Tj
+ET
+54 318 m 558 318 l S
+BT
+/F1 10 Tf
+1 0 0 1 66 305 Tm (- The Streamlit app uses native multipage navigation for smooth page switching.) Tj
+1 0 0 1 66 292 Tm (- Chat has a scrollable message window with a fixed query form below the chat area.) Tj
+1 0 0 1 66 279 Tm (- The user query appears in the chat window immediately while the answer is) Tj
+1 0 0 1 66 266 Tm (  processing.) Tj
+1 0 0 1 66 253 Tm (- Chat sessions are persisted and available from the Chat page sidebar only,) Tj
+1 0 0 1 66 240 Tm (  reducing non-chat page overhead.) Tj
+1 0 0 1 66 227 Tm (- Responses include citations/sources from retrieval-backed tools and optional) Tj
+1 0 0 1 66 214 Tm (  snippets.) Tj
+1 0 0 1 66 201 Tm (- The frontend hides operational response details from the normal chat view; those) Tj
+1 0 0 1 66 188 Tm (  details are available in dashboards and traces.) Tj
+/F2 13 Tf
+1 0 0 1 54 171 Tm (Reasoning) Tj
+/F1 10 Tf
+1 0 0 1 54 158 Tm (The chat page is optimized for day-to-day use. Heavy admin pages and history loading) Tj
+1 0 0 1 54 145 Tm (are isolated so typing and chat interaction remain responsive.) Tj
+/F2 16 Tf
+1 0 0 1 54 126 Tm (8. Observability, Evaluation, And Dashboarding) Tj
+ET
+54 118 m 558 118 l S
+BT
+/F1 10 Tf
+1 0 0 1 66 105 Tm (- Each chat request receives a trace ID; Langfuse traces are used when configured) Tj
+1 0 0 1 66 92 Tm (  and local IDs are used as fallback.) Tj
+1 0 0 1 66 79 Tm (- Trace metadata includes user/session, model, prompt label, tools used, tool flow,) Tj
+/F1 8 Tf
+1 0 0 1 522 32 Tm (Page 3) Tj
+ET
+Q
+endstream
+endobj
+12 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R /F2 4 0 R /F3 5 0 R >> >> /Contents 13 0 R >>
+endobj
+13 0 obj
+<< /Length 4225 >>
+stream
+q
+0 0 0 rg
+BT
+/F2 9 Tf
+1 0 0 1 54 760 Tm (Dstrmaysam Healthcare Knowledge Agent - System Feature Guide) Tj
+ET
+54 735 m 558 735 l S
+BT
+/F1 10 Tf
+1 0 0 1 66 722 Tm (  sources, safety, token counts, and latency.) Tj
+1 0 0 1 66 709 Tm (- The admin dashboard shows per-query and aggregate views for latency, tokens,) Tj
+1 0 0 1 66 696 Tm (  users, tools, models, sources, guardrails, and RAGAS.) Tj
+1 0 0 1 66 683 Tm (- Latency breakdown includes history, prompt, trace setup, LLM setup, LLM calls,) Tj
+1 0 0 1 66 670 Tm (  retrieval, catalog, index checks, guardrail, safety, and history save timings.) Tj
+1 0 0 1 66 657 Tm (- RAGAS scoring runs in the background and publishes faithfulness, answer) Tj
+1 0 0 1 66 644 Tm (  relevancy, context precision, and context recall to Langfuse.) Tj
+1 0 0 1 66 631 Tm (- The eval script can publish RAGAS scores to response traces and create an) Tj
+1 0 0 1 66 618 Tm (  evaluation-run summary trace.) Tj
+/F2 13 Tf
+1 0 0 1 54 601 Tm (Reasoning) Tj
+/F1 10 Tf
+1 0 0 1 54 588 Tm (Healthcare-facing knowledge systems need auditability. The dashboard and Langfuse) Tj
+1 0 0 1 54 575 Tm (traces make it possible to diagnose latency, tool choice, retrieval quality, prompt) Tj
+1 0 0 1 54 562 Tm (behavior, and answer quality after the fact.) Tj
+/F2 16 Tf
+1 0 0 1 54 543 Tm (9. Safety And Guardrails) Tj
+ET
+54 535 m 558 535 l S
+BT
+/F1 10 Tf
+1 0 0 1 66 522 Tm (- PHI redaction is applied before agent input.) Tj
+1 0 0 1 66 509 Tm (- Initial safety context is included before answer generation.) Tj
+1 0 0 1 66 496 Tm (- Final safety assessment runs after answer generation using actual sources.) Tj
+1 0 0 1 66 483 Tm (- Response-style guardrail rewrites are triggered when the query or draft answer) Tj
+1 0 0 1 66 470 Tm (  contains risky tone/style markers.) Tj
+1 0 0 1 66 457 Tm (- Guardrails require professional, neutral, concise responses and remove jokes,) Tj
+1 0 0 1 66 444 Tm (  sarcasm, roleplay, slang, emojis, and theatrical wording.) Tj
+1 0 0 1 66 431 Tm (- The guardrail rewrite uses the fast Azure OpenAI deployment when available.) Tj
+/F2 13 Tf
+1 0 0 1 54 414 Tm (Reasoning) Tj
+/F1 10 Tf
+1 0 0 1 54 401 Tm (The system balances latency and safety by avoiding a guardrail call for every answer.) Tj
+1 0 0 1 54 388 Tm (It uses deterministic risk detection to decide when an LLM rewrite is needed, then) Tj
+1 0 0 1 54 375 Tm (records the outcome in trace metadata.) Tj
+/F2 16 Tf
+1 0 0 1 54 356 Tm (10. Agent Workflow) Tj
+ET
+54 348 m 558 348 l S
+BT
+/F1 10 Tf
+1 0 0 1 54 335 Tm (The agent uses LangGraph-compatible execution with optimized planned paths. LangChain) Tj
+1 0 0 1 54 322 Tm (remains useful for Azure OpenAI model integrations, embeddings, message compatibility,) Tj
+1 0 0 1 54 309 Tm (and callback plumbing.) Tj
+/F2 13 Tf
+1 0 0 1 54 292 Tm (End-to-end chat workflow) Tj
+/F1 10 Tf
+1 0 0 1 66 279 Tm (- 1. Request enters /chat with bearer token and optional session_id.) Tj
+1 0 0 1 66 266 Tm (- 2. Auth dependency validates token and blocks access if password_change_required) Tj
+1 0 0 1 66 253 Tm (  is true.) Tj
+1 0 0 1 66 240 Tm (- 3. Query is redacted for PHI and conversation history is loaded.) Tj
+1 0 0 1 66 227 Tm (- 4. Langfuse trace is opened when configured; otherwise a local trace ID is used.) Tj
+1 0 0 1 66 214 Tm (- 5. System prompt is loaded from Langfuse or fallback prompt, then response-style) Tj
+1 0 0 1 66 201 Tm (  baseline is appended.) Tj
+1 0 0 1 66 188 Tm (- 6. Initial safety assessment is generated and included in agent context.) Tj
+1 0 0 1 66 175 Tm (- 7. The planner decides whether the query is RAG-only, deterministic-only,) Tj
+1 0 0 1 66 162 Tm (  multipart, or ambiguous.) Tj
+1 0 0 1 66 149 Tm (- 8. Fast planned paths execute direct tool calls for clear RAG/deterministic) Tj
+1 0 0 1 66 136 Tm (  questions.) Tj
+1 0 0 1 66 123 Tm (- 9. Ambiguous questions fall back to LangGraph tool-calling loop with a maximum) Tj
+1 0 0 1 66 110 Tm (  LLM-call limit.) Tj
+1 0 0 1 66 97 Tm (- 10. Tool outputs are bounded into context and one final answer LLM call) Tj
+1 0 0 1 66 84 Tm (  synthesizes the response.) Tj
+1 0 0 1 66 71 Tm (- 11. Response guardrail rewrite runs only when tone/style risk is detected.) Tj
+/F1 8 Tf
+1 0 0 1 522 32 Tm (Page 4) Tj
+ET
+Q
+endstream
+endobj
+14 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R /F2 4 0 R /F3 5 0 R >> >> /Contents 15 0 R >>
+endobj
+15 0 obj
+<< /Length 4045 >>
+stream
+q
+0 0 0 rg
+BT
+/F2 9 Tf
+1 0 0 1 54 760 Tm (Dstrmaysam Healthcare Knowledge Agent - System Feature Guide) Tj
+ET
+54 735 m 558 735 l S
+BT
+/F1 10 Tf
+1 0 0 1 66 722 Tm (- 12. Final safety assessment, audit metadata, token estimates, latency breakdown,) Tj
+1 0 0 1 66 709 Tm (  sources, and tool flow are stored.) Tj
+1 0 0 1 66 696 Tm (- 13. Chat history is persisted and RAGAS/Langfuse enrichment runs in the) Tj
+1 0 0 1 66 683 Tm (  background.) Tj
+/F2 13 Tf
+1 0 0 1 54 666 Tm (Workflow diagram) Tj
+/F3 8 Tf
+1 0 0 1 66 653 Tm (User -> FastAPI /chat -> Auth + password gate) Tj
+1 0 0 1 66 640 Tm (     -> PHI redaction -> history load -> Langfuse trace/prompt) Tj
+1 0 0 1 66 627 Tm (     -> safety context -> planner) Tj
+1 0 0 1 66 614 Tm (     -> [fast RAG | fast deterministic | multipart | LangGraph fallback]) Tj
+1 0 0 1 66 601 Tm (     -> tools -> bounded context -> Azure OpenAI answer) Tj
+1 0 0 1 66 588 Tm (     -> optional guardrail rewrite -> final safety) Tj
+1 0 0 1 66 575 Tm (     -> response + sources -> history + Langfuse + background RAGAS) Tj
+/F2 13 Tf
+1 0 0 1 54 558 Tm (RAG document search tool workflow) Tj
+/F1 10 Tf
+1 0 0 1 66 545 Tm (- Catalog candidate selection: manifest metadata is filtered by role and matched) Tj
+1 0 0 1 66 532 Tm (  against query terms.) Tj
+1 0 0 1 66 519 Tm (- Search narrowing: candidate document keys are passed into OpenSearch/Chroma) Tj
+1 0 0 1 66 506 Tm (  retrieval.) Tj
+1 0 0 1 66 493 Tm (- Retrieval: vector and keyword search run against selected documents; broad) Tj
+1 0 0 1 66 480 Tm (  fallback is used when catalog matching fails.) Tj
+1 0 0 1 66 467 Tm (- Neighbor expansion: adjacent chunks are retrieved to improve context continuity.) Tj
+1 0 0 1 66 454 Tm (- Source packaging: snippets, title, URI, score, metadata, and document keys are) Tj
+1 0 0 1 66 441 Tm (  returned for citations and RAGAS.) Tj
+/F2 13 Tf
+1 0 0 1 54 424 Tm (Deterministic lookup workflow) Tj
+/F1 10 Tf
+1 0 0 1 66 411 Tm (- The planner detects structured-fact intent such as rota, patient, appointment,) Tj
+1 0 0 1 66 398 Tm (  department, contact, or formulary queries.) Tj
+1 0 0 1 66 385 Tm (- The Postgres lookup service applies user access context and queries matching) Tj
+1 0 0 1 66 372 Tm (  tables.) Tj
+1 0 0 1 66 359 Tm (- Rows are returned as exact structured JSON.) Tj
+1 0 0 1 66 346 Tm (- The answer synthesizer preserves exact values and does not reinterpret) Tj
+1 0 0 1 66 333 Tm (  deterministic facts.) Tj
+/F2 13 Tf
+1 0 0 1 54 316 Tm (Document catalog workflow) Tj
+/F1 10 Tf
+1 0 0 1 66 303 Tm (- The document catalog tool exposes governed document metadata to the agent when) Tj
+1 0 0 1 66 290 Tm (  explicitly called.) Tj
+1 0 0 1 66 277 Tm (- Internally, the same catalog logic acts as a helper for RAG narrowing.) Tj
+1 0 0 1 66 264 Tm (- Internal catalog assistance is shown in tool_flow but is not added to tools_used) Tj
+1 0 0 1 66 251 Tm (  unless the LLM explicitly selected document_catalog.) Tj
+1 0 0 1 66 238 Tm (- This keeps user-visible tool usage honest while still making helper behavior) Tj
+1 0 0 1 66 225 Tm (  auditable.) Tj
+/F2 13 Tf
+1 0 0 1 54 208 Tm (Loop limit and fallback) Tj
+/F1 10 Tf
+1 0 0 1 54 195 Tm (The LangGraph fallback loop caps LLM tool-calling iterations. If the limit is reached,) Tj
+1 0 0 1 54 182 Tm (the agent produces a final no-tool answer from accumulated context instead of hanging.) Tj
+/F2 16 Tf
+1 0 0 1 54 163 Tm (11. Performance And Latency Controls) Tj
+ET
+54 155 m 558 155 l S
+BT
+/F1 10 Tf
+1 0 0 1 66 142 Tm (- Fast planned execution bypasses tool-selection LLM calls for clear query types.) Tj
+1 0 0 1 66 129 Tm (- Fast model routing can use AZURE_OPENAI_FAST_DEPLOYMENT for answer synthesis and) Tj
+1 0 0 1 66 116 Tm (  guardrail rewrites.) Tj
+1 0 0 1 66 103 Tm (- OpenSearch multi-search combines vector and keyword queries when available.) Tj
+1 0 0 1 66 90 Tm (- Embedding cache and retrieval cache reduce repeated work.) Tj
+1 0 0 1 66 77 Tm (- Catalog candidate cache reduces repeated manifest matching.) Tj
+/F1 8 Tf
+1 0 0 1 522 32 Tm (Page 5) Tj
+ET
+Q
+endstream
+endobj
+16 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R /F2 4 0 R /F3 5 0 R >> >> /Contents 17 0 R >>
+endobj
+17 0 obj
+<< /Length 3499 >>
+stream
+q
+0 0 0 rg
+BT
+/F2 9 Tf
+1 0 0 1 54 760 Tm (Dstrmaysam Healthcare Knowledge Agent - System Feature Guide) Tj
+ET
+54 735 m 558 735 l S
+BT
+/F1 10 Tf
+1 0 0 1 66 722 Tm (- Context budgets keep answer prompts bounded.) Tj
+1 0 0 1 66 709 Tm (- Startup warmup primes LLM clients, Langfuse prompt cache, document manifest, and) Tj
+1 0 0 1 66 696 Tm (  retrieval path.) Tj
+1 0 0 1 66 683 Tm (- Background history save, trace enrichment, and RAGAS scoring avoid adding) Tj
+1 0 0 1 66 670 Tm (  synchronous chat latency.) Tj
+/F2 13 Tf
+1 0 0 1 54 653 Tm (Reasoning) Tj
+/F1 10 Tf
+1 0 0 1 54 640 Tm (The system optimizes full-answer completion time without removing functionality. It) Tj
+1 0 0 1 54 627 Tm (keeps traceability and evaluation while moving nonessential enrichment off the) Tj
+1 0 0 1 54 614 Tm (critical path.) Tj
+/F2 16 Tf
+1 0 0 1 54 595 Tm (12. Main API And UI Features) Tj
+ET
+54 587 m 558 587 l S
+BT
+/F2 13 Tf
+1 0 0 1 54 570 Tm (Backend endpoints) Tj
+/F1 10 Tf
+1 0 0 1 66 557 Tm (- GET /health: service status, settings summary, registered tools, and warmup) Tj
+1 0 0 1 66 544 Tm (  status.) Tj
+1 0 0 1 66 531 Tm (- POST /auth/login, GET /auth/me, POST /auth/change-password: authentication and) Tj
+1 0 0 1 66 518 Tm (  password management.) Tj
+1 0 0 1 66 505 Tm (- POST /chat: main conversational API with sources, tools, trace ID, tokens,) Tj
+1 0 0 1 66 492 Tm (  latency, safety, and performance metadata.) Tj
+1 0 0 1 66 479 Tm (- GET /chat/sessions and GET /chat/sessions/{session_id}: persisted chat history.) Tj
+1 0 0 1 66 466 Tm (- GET /documents: role-filtered indexed document list.) Tj
+1 0 0 1 66 453 Tm (- Admin users: GET/POST/PATCH /admin/users and POST /admin/users/{username}/reset-) Tj
+1 0 0 1 66 440 Tm (  password.) Tj
+1 0 0 1 66 427 Tm (- Admin documents: upload, ingest, delete indexes.) Tj
+1 0 0 1 66 414 Tm (- Admin dashboard: per-query and aggregate operational metrics.) Tj
+1 0 0 1 66 401 Tm (- Admin warmup: manual warmup trigger.) Tj
+1 0 0 1 66 388 Tm (- Admin patient details: filtered Postgres patient/appointment data access.) Tj
+/F2 13 Tf
+1 0 0 1 54 371 Tm (Frontend pages) Tj
+/F1 10 Tf
+1 0 0 1 66 358 Tm (- Chat: conversational Q&A with session history.) Tj
+1 0 0 1 66 345 Tm (- Dashboard: traces, tool flow, latency, tokens, RAGAS, guardrails, and per-query) Tj
+1 0 0 1 66 332 Tm (  drilldowns.) Tj
+1 0 0 1 66 319 Tm (- Patient Details: filterable table view over configured Postgres patient data.) Tj
+1 0 0 1 66 306 Tm (- Users: admin user creation, role assignment, department assignment, and password) Tj
+1 0 0 1 66 293 Tm (  reset.) Tj
+1 0 0 1 66 280 Tm (- Documents: upload, ingest/index, index reset, and indexed-document table.) Tj
+/F2 16 Tf
+1 0 0 1 54 261 Tm (13. Summary) Tj
+ET
+54 253 m 558 253 l S
+BT
+/F1 10 Tf
+1 0 0 1 54 240 Tm (The system is a role-aware healthcare knowledge platform with a practical split) Tj
+1 0 0 1 54 227 Tm (between semantic document retrieval and exact deterministic lookup. LangGraph handles) Tj
+1 0 0 1 54 214 Tm (agent workflow, Azure OpenAI provides model and embedding services, OpenSearch/Chroma) Tj
+1 0 0 1 54 201 Tm (provide vector search depending on runtime mode, Postgres stores structured facts and) Tj
+1 0 0 1 54 188 Tm (local history, and Langfuse/RAGAS make behavior measurable. The design favors) Tj
+1 0 0 1 54 175 Tm (auditability, local-developer productivity, and operational control while keeping the) Tj
+1 0 0 1 54 162 Tm (chat experience focused and responsive.) Tj
+/F1 8 Tf
+1 0 0 1 522 32 Tm (Page 6) Tj
+ET
+Q
+endstream
+endobj
+xref
+0 18
+0000000000 65535 f 
+0000000015 00000 n 
+0000000064 00000 n 
+0000000155 00000 n 
+0000000225 00000 n 
+0000000300 00000 n 
+0000000368 00000 n 
+0000000514 00000 n 
+0000004743 00000 n 
+0000004889 00000 n 
+0000009071 00000 n 
+0000009219 00000 n 
+0000013410 00000 n 
+0000013558 00000 n 
+0000017836 00000 n 
+0000017984 00000 n 
+0000022082 00000 n 
+0000022230 00000 n 
+trailer
+<< /Size 18 /Root 1 0 R >>
+startxref
+25782
+%%EOF
