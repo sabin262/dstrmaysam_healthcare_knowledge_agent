@@ -5,6 +5,8 @@ import csv
 import io
 import re
 from dataclasses import dataclass, field
+from datetime import date, timedelta
+from pathlib import Path
 from typing import Any, Sequence
 
 from .config import AppSettings
@@ -38,6 +40,35 @@ SCHEMA_SYNONYMS = {
     "formulary": {"medicine", "medicines", "drug", "drugs", "dose", "doses", "restricted", "approval"},
     "patient": {"patients", "mrn", "nhs", "dob"},
     "ward": {"wards", "bed", "beds", "floor", "ipd", "inpatient"},
+}
+
+DOCTOR_ROLE_MARKERS = {
+    "doctor",
+    "doctors",
+    "physician",
+    "physicians",
+    "consultant",
+    "consultants",
+    "registrar",
+    "registrars",
+    "clinician",
+    "clinicians",
+}
+
+NURSE_ROLE_MARKERS = {"nurse", "nurses", "nursing"}
+
+STAFF_ROTA_QUERY_MARKERS = {
+    "available",
+    "availability",
+    "rota",
+    "schedule",
+    "scheduled",
+    "shift",
+    "shifts",
+    "oncall",
+    "on-call",
+    "today",
+    "tomorrow",
 }
 
 BASE_STOPWORDS = {
@@ -137,6 +168,49 @@ def _has_person_name_hint(terms: list[str]) -> bool:
     return len(name_like_terms) >= 2
 
 
+def _requested_rota_dates(query: str, today: date | None = None) -> list[str]:
+    q = query.lower()
+    base_date = today or date.today()
+    requested: list[date] = []
+    if "today" in q:
+        requested.append(base_date)
+    if "tomorrow" in q:
+        requested.append(base_date + timedelta(days=1))
+    for match in re.findall(r"\b20\d{2}-\d{2}-\d{2}\b", query):
+        try:
+            requested.append(date.fromisoformat(match))
+        except ValueError:
+            continue
+    if not requested and any(marker in q for marker in ["available", "availability", "rota", "schedule", "scheduled", "shift"]):
+        requested.append(base_date)
+
+    unique: list[str] = []
+    for value in requested:
+        iso_value = value.isoformat()
+        if iso_value not in unique:
+            unique.append(iso_value)
+    return unique
+
+
+def _requested_rota_role_groups(query: str) -> set[str]:
+    terms = set(_terms(query))
+    groups: set[str] = set()
+    if terms & DOCTOR_ROLE_MARKERS:
+        groups.add("doctor")
+    if terms & NURSE_ROLE_MARKERS:
+        groups.add("nurse")
+    return groups
+
+
+def _is_staff_rota_query(query: str) -> bool:
+    q = query.lower()
+    terms = set(_terms(query))
+    role_requested = bool(terms & (DOCTOR_ROLE_MARKERS | NURSE_ROLE_MARKERS))
+    rota_requested = any(marker in q for marker in STAFF_ROTA_QUERY_MARKERS)
+    mentions_staff_rota = "staff_rota" in q or "staff rota" in q
+    return mentions_staff_rota or (role_requested and rota_requested)
+
+
 def _access_scopes(user: HealthcareUserContext) -> tuple[str, ...]:
     roles = set(user.roles)
     if "admin" in roles or "director" in roles:
@@ -201,7 +275,20 @@ class DeterministicLookupService:
         selected_assets = self._matching_csv_assets(query, csv_assets or [])
         selected_filenames = [str(asset.get("filename") or "") for asset in selected_assets if asset.get("filename")]
         try:
-            if selected_filenames:
+            if _is_staff_rota_query(query):
+                rows = self._query_staff_rota_rows(query, scopes, limit)
+                role_groups = _requested_rota_role_groups(query)
+                if not rows and role_groups == {"doctor"}:
+                    rows.extend(
+                        self._lookup_category(
+                            "doctors",
+                            query,
+                            scopes,
+                            limit - len(rows),
+                            stopwords=schema_stopwords,
+                        )
+                    )
+            elif selected_filenames:
                 rows = self._query_uploaded_lookup_rows(
                     query,
                     scopes,
@@ -242,7 +329,10 @@ class DeterministicLookupService:
                 },
             )
 
-        message = "No matching rows found." if not rows else f"Found {len(rows)} matching row(s)."
+        if category == "staff_rota":
+            message = self._staff_rota_message(query, rows)
+        else:
+            message = "No matching rows found." if not rows else f"Found {len(rows)} matching row(s)."
         return LookupResult(
             category,
             rows,
@@ -255,6 +345,44 @@ class DeterministicLookupService:
                 "source": "postgres",
             },
         )
+
+    def _staff_rota_message(self, query: str, rows: Sequence[dict[str, Any]]) -> str:
+        requested_dates = _requested_rota_dates(query)
+        requested_groups = _requested_rota_role_groups(query)
+        if not rows:
+            if requested_dates:
+                return (
+                    "No matching staff_rota.csv rows found for requested date(s): "
+                    + ", ".join(requested_dates)
+                    + "."
+                )
+            return "No matching staff_rota.csv rows found."
+
+        found_dates: set[str] = set()
+        found_groups: set[str] = set()
+        for result_row in rows:
+            payload = result_row.get("row") if isinstance(result_row, dict) else {}
+            if not isinstance(payload, dict):
+                continue
+            if payload.get("date"):
+                found_dates.add(str(payload["date"]))
+            role = str(payload.get("role") or "").lower()
+            if any(marker in role for marker in ["consultant", "physician", "registrar", "doctor", "clinician"]):
+                found_groups.add("doctor")
+            if "nurse" in role:
+                found_groups.add("nurse")
+
+        notes = [f"Found {len(rows)} matching staff_rota.csv row(s)."]
+        if requested_dates:
+            notes.append("Requested dates: " + ", ".join(requested_dates) + ".")
+            missing_dates = [value for value in requested_dates if value not in found_dates]
+            if missing_dates:
+                notes.append("No matching rows found for: " + ", ".join(missing_dates) + ".")
+        if requested_groups:
+            missing_groups = sorted(requested_groups - found_groups)
+            if missing_groups:
+                notes.append("No matching " + ", ".join(missing_groups) + " rows found for the requested date range.")
+        return " ".join(notes)
 
     def ingest_uploaded_csv(
         self,
@@ -514,6 +642,8 @@ class DeterministicLookupService:
             return "patients"
         if any(marker in q for marker in ["patient", "mrn", "nhs", "date of birth", "dob"]):
             return "patients"
+        if _is_staff_rota_query(query):
+            return "staff_rota"
         if any(marker in q for marker in ["doctor", "physician", "consultant", "clinician"]):
             return "doctors"
         if any(marker in q for marker in ["department", "service", "unit"]):
@@ -534,6 +664,147 @@ class DeterministicLookupService:
     def _qualified_access_sql(self, table_alias: str = "") -> str:
         qualifier = f"{table_alias}." if table_alias else ""
         return f"({qualifier}access_level = ANY(%s) OR {qualifier}access_level IS NULL)"
+
+    def _query_staff_rota_rows(self, query: str, scopes: tuple[str, ...], limit: int) -> list[dict[str, Any]]:
+        if limit <= 0:
+            return []
+
+        requested_dates = _requested_rota_dates(query)
+        requested_groups = _requested_rota_role_groups(query)
+        where_parts = [self._access_sql(), "lower(source_filename) = 'staff_rota.csv'"]
+        params: list[Any] = [list(scopes)]
+        if requested_dates:
+            where_parts.append("row_data->>'date' = ANY(%s)")
+            params.append(requested_dates)
+
+        role_filters: list[str] = []
+        if "doctor" in requested_groups:
+            role_filters.extend(["%consultant%", "%physician%", "%registrar%", "%doctor%", "%clinician%"])
+        if "nurse" in requested_groups:
+            role_filters.append("%nurse%")
+        if role_filters:
+            where_parts.append(
+                "(" + " OR ".join(["lower(row_data->>'role') LIKE %s" for _ in role_filters]) + ")"
+            )
+            params.extend(role_filters)
+
+        department_terms = [
+            term
+            for term in self._search_terms(query, STOPWORDS | STAFF_ROTA_QUERY_MARKERS | DOCTOR_ROLE_MARKERS | NURSE_ROLE_MARKERS)
+            if term not in {"list", "me", "available", "availability", "today", "tomorrow", "csv", "file"}
+        ]
+        if department_terms:
+            patterns = [_like(term) for term in department_terms[:4]]
+            where_parts.append(
+                "("
+                + " OR ".join(
+                    ["lower(row_data->>'department') LIKE %s OR lower(row_data->>'staff_name') LIKE %s" for _ in patterns]
+                )
+                + ")"
+            )
+            for pattern in patterns:
+                params.extend([pattern, pattern])
+
+        params.append(limit)
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                self._ensure_uploaded_lookup_table(cur)
+                cur.execute(
+                    f"""
+                    SELECT source_filename, row_number, row_data, access_level
+                    FROM uploaded_lookup_rows
+                    WHERE {" AND ".join(where_parts)}
+                    ORDER BY row_data->>'date', row_data->>'role', row_data->>'department', row_number
+                    LIMIT %s
+                    """,
+                    tuple(params),
+                )
+                rows = []
+                for row in cur.fetchall():
+                    row_dict = dict(row)
+                    payload = row_dict.get("row_data")
+                    if isinstance(payload, str):
+                        try:
+                            payload = json.loads(payload)
+                        except json.JSONDecodeError:
+                            payload = {"value": payload}
+                    rows.append(
+                        {
+                            "source_table": "uploaded_lookup_rows",
+                            "source_filename": row_dict.get("source_filename"),
+                            "row_number": row_dict.get("row_number"),
+                            "row": payload,
+                            "access_level": row_dict.get("access_level"),
+                        }
+                    )
+                return rows or self._query_staff_rota_local_csv(
+                    query,
+                    scopes,
+                    limit,
+                    requested_dates=requested_dates,
+                    requested_groups=requested_groups,
+                    department_terms=department_terms,
+                )
+
+    def _query_staff_rota_local_csv(
+        self,
+        query: str,
+        scopes: tuple[str, ...],
+        limit: int,
+        *,
+        requested_dates: Sequence[str] | None = None,
+        requested_groups: set[str] | None = None,
+        department_terms: Sequence[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        if not self.settings:
+            return []
+        rota_path = Path(self.settings.local_data_dir) / "raw" / "staff_rota.csv"
+        if not rota_path.exists():
+            return []
+
+        dates = set(requested_dates or _requested_rota_dates(query))
+        role_groups = requested_groups if requested_groups is not None else _requested_rota_role_groups(query)
+        search_terms = [term.lower() for term in (department_terms or [])]
+
+        rows: list[dict[str, Any]] = []
+        with rota_path.open("r", encoding="utf-8-sig", newline="") as handle:
+            reader = csv.DictReader(handle)
+            for row_number, payload in enumerate(reader, start=1):
+                cleaned = {str(key).strip(): str(value).strip() for key, value in payload.items() if key}
+                access_level = cleaned.get("access_level") or "all_staff"
+                if access_level not in scopes:
+                    continue
+                if dates and cleaned.get("date") not in dates:
+                    continue
+                role = cleaned.get("role", "").lower()
+                if role_groups and not (
+                    ("doctor" in role_groups and any(marker in role for marker in ["consultant", "physician", "registrar", "doctor", "clinician"]))
+                    or ("nurse" in role_groups and "nurse" in role)
+                ):
+                    continue
+                if search_terms:
+                    haystack = " ".join(
+                        [
+                            cleaned.get("department", ""),
+                            cleaned.get("staff_name", ""),
+                            cleaned.get("role", ""),
+                            cleaned.get("contact", ""),
+                        ]
+                    ).lower()
+                    if not any(term in haystack for term in search_terms):
+                        continue
+                rows.append(
+                    {
+                        "source_table": "local_csv",
+                        "source_filename": "staff_rota.csv",
+                        "row_number": row_number,
+                        "row": cleaned,
+                        "access_level": access_level,
+                    }
+                )
+                if len(rows) >= limit:
+                    break
+        return rows
 
     def patient_dashboard(
         self,

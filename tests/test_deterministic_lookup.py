@@ -1,7 +1,16 @@
 import json
 import unittest
+from datetime import date
 
-from backend.app.deterministic_lookup import DeterministicLookupService, LookupResult, _best_search_term, _terms
+from backend.app.deterministic_lookup import (
+    DeterministicLookupService,
+    LookupResult,
+    _best_search_term,
+    _is_staff_rota_query,
+    _requested_rota_dates,
+    _requested_rota_role_groups,
+    _terms,
+)
 from backend.app.healthcare import HealthcareAccessControl, HealthcareSafetyGuard, HealthcareUserContext
 from backend.app.healthcare_tools import build_healthcare_agent_tools
 
@@ -99,6 +108,19 @@ class DeterministicLookupToolTests(unittest.TestCase):
         )
 
         self.assertEqual(terms, ["cardiology"])
+
+    def test_staff_rota_availability_question_is_classified_for_rota_lookup(self):
+        service = DeterministicLookupService(settings=None)
+
+        query = "show me a list of available doctors and nurses for today and tomorrow"
+
+        self.assertEqual(service._classify(query), "staff_rota")
+        self.assertTrue(_is_staff_rota_query(query))
+        self.assertEqual(_requested_rota_role_groups(query), {"doctor", "nurse"})
+        self.assertEqual(
+            _requested_rota_dates(query, today=date(2026, 6, 23)),
+            ["2026-06-23", "2026-06-24"],
+        )
 
 
 if __name__ == "__main__":

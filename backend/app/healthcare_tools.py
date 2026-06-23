@@ -11,7 +11,7 @@ from .healthcare import (
     HealthcareUserContext,
     SourceGovernance,
 )
-from .deterministic_lookup import DeterministicLookupService
+from .deterministic_lookup import DeterministicLookupService, _is_staff_rota_query
 from .retrieval import RetrievalService
 from .storage import DocumentRecord, DocumentStore
 from .tools import AgentTool, format_retrieval_hits
@@ -78,7 +78,8 @@ def _deterministic_csv_assets(
 def _deterministic_tool_description(csv_assets: list[dict[str, Any]]) -> str:
     base = (
         "Exact Postgres lookup for patient details, contact information, doctor information, "
-        "department directory data, appointments, wards, formulary facts, and uploaded CSV lookup rows. "
+        "department directory data, appointments, wards, formulary facts, staff rota availability, "
+        "and uploaded CSV lookup rows including all csv. files "
         "Use this when the user asks for exact structured values, multiple known values to look up, "
         "or table-like data that can answer the question without document interpretation."
     )
@@ -142,6 +143,8 @@ def build_healthcare_agent_tools(
 
     def calendar_rota_lookup(query: str) -> str:
         """Lookup calendar, clinic, training, on-call, and rota data from approved CSV sources."""
+        if deterministic_lookup is not None and _is_staff_rota_query(query):
+            return deterministic_lookup.lookup(query, user, csv_assets=deterministic_csv_assets).to_json()
         terms = _terms(query)
         matches: list[dict[str, Any]] = []
         records = [
@@ -215,7 +218,10 @@ def build_healthcare_agent_tools(
         ),
         AgentTool(
             name="calendar_rota_lookup",
-            description="Lookup clinics, training, rota, and on-call schedules from approved structured sources.",
+            description=(
+                "Lookup clinics, training, and general rota schedules from approved structured sources. "
+                "For staff availability, doctors, nurses, or staff_rota.csv questions, prefer postgres_deterministic_lookup."
+            ),
             run=calendar_rota_lookup,
         ),
         AgentTool(

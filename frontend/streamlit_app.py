@@ -31,7 +31,8 @@ def _set_auth_cookie(token: str, max_age_seconds: int) -> None:
         const cookieName = {json.dumps(AUTH_COOKIE_NAME)};
         const token = {json.dumps(token)};
         const maxAge = {int(max_age_seconds)};
-        document.cookie = cookieName + "=" + encodeURIComponent(token)
+        const targetDocument = window.parent && window.parent.document ? window.parent.document : document;
+        targetDocument.cookie = cookieName + "=" + encodeURIComponent(token)
             + "; Max-Age=" + maxAge + "; Path=/; SameSite=Lax";
         </script>
         """,
@@ -45,7 +46,8 @@ def _clear_auth_cookie(*, reload_parent: bool = False) -> None:
         f"""
         <script>
         const cookieName = {json.dumps(AUTH_COOKIE_NAME)};
-        document.cookie = cookieName + "=; Max-Age=0; Path=/; SameSite=Lax";
+        const targetDocument = window.parent && window.parent.document ? window.parent.document : document;
+        targetDocument.cookie = cookieName + "=; Max-Age=0; Path=/; SameSite=Lax";
         {reload_script}
         </script>
         """,
@@ -62,11 +64,9 @@ def _read_auth_cookie() -> str | None:
 
 
 def sync_auth_cookie() -> None:
-    token = st.session_state.get("access_token")
-    if not token:
-        return
-    max_age = int(st.session_state.get("access_token_expires_in") or AUTH_COOKIE_DEFAULT_MAX_AGE_SECONDS)
-    _set_auth_cookie(str(token), max_age)
+    # Keep authentication tied to the current Streamlit session. Browser cookie
+    # auto-restore made stale tokens look like fresh successful logins.
+    return
 
 
 def store_user_context(data: dict[str, Any]) -> None:
@@ -77,36 +77,29 @@ def store_user_context(data: dict[str, Any]) -> None:
 
 
 def restore_login_from_cookie() -> None:
-    if st.session_state.get("access_token"):
-        return
-    token = _read_auth_cookie()
-    if not token:
-        return
-    st.session_state.access_token = token
-    try:
-        data = get_json("/auth/me")
-        if isinstance(data, dict):
-            store_user_context(data)
-        st.session_state.setdefault("session_id", None)
-        st.session_state.setdefault("messages", [])
-        warm_document_manifest_cache()
-    except Exception:
-        for key in (
-            "access_token",
-            "access_token_expires_in",
-            "username",
-            "roles",
-            "departments",
-            "password_change_required",
-        ):
-            st.session_state.pop(key, None)
-        _clear_auth_cookie()
+    st.session_state.pop("logout_requested", None)
+    _clear_auth_cookie()
+    return
 
 
 def sign_out() -> None:
-    _clear_auth_cookie(reload_parent=True)
+    for key in (
+        "access_token",
+        "access_token_expires_in",
+        "username",
+        "roles",
+        "departments",
+        "password_change_required",
+        "session_id",
+        "messages",
+        "pending_chat_query",
+    ):
+        st.session_state.pop(key, None)
+    st.session_state.logout_requested = True
     st.session_state.clear()
-    st.stop()
+    st.session_state.logout_requested = True
+    _clear_auth_cookie()
+    st.rerun()
 
 
 def api_headers() -> dict[str, str]:
@@ -341,6 +334,17 @@ def inject_app_theme() -> None:
             color: var(--hka-muted);
             font-size: 0.9rem;
             line-height: 1.45;
+        }
+        div[data-testid="stVerticalBlockBorderWrapper"]:has(.hka-chat-window-marker) {
+            height: calc(100dvh - 9.5rem) !important;
+            min-height: 360px !important;
+            max-height: calc(100dvh - 9.5rem) !important;
+        }
+        div[data-testid="stVerticalBlockBorderWrapper"]:has(.hka-chat-window-marker),
+        div[data-testid="stVerticalBlockBorderWrapper"]:has(.hka-chat-window-marker) > div,
+        div[data-testid="stVerticalBlockBorderWrapper"]:has(.hka-chat-window-marker) div[data-testid="stVerticalBlock"] {
+            height: 100% !important;
+            overflow-y: auto !important;
         }
         </style>
         """,
@@ -1181,6 +1185,7 @@ def render_chat_progress(
         with st.chat_message("assistant"):
             with st.status(label, expanded=True, state=state):
                 st.write(message)
+    scroll_chat_to_latest()
 
 
 def submit_chat_query_with_progress(query: str, progress_placeholder: Any) -> None:
@@ -1217,6 +1222,7 @@ def submit_chat_query_with_progress(query: str, progress_placeholder: Any) -> No
 
 
 def render_chat_messages() -> Any:
+    st.markdown('<span class="hka-chat-window-marker"></span>', unsafe_allow_html=True)
     messages = st.session_state.get("messages", [])
     if not messages:
         st.info("Ask a question about healthcare knowledge.")
@@ -1227,36 +1233,92 @@ def render_chat_messages() -> Any:
     return st.empty()
 
 
+def scroll_chat_to_latest() -> None:
+    components.html(
+        """
+        <script>
+        const scrollLatestChat = () => {
+            const doc = window.parent.document;
+            const markers = Array.from(doc.querySelectorAll(".hka-chat-window-marker"));
+            const marker = markers[markers.length - 1];
+            if (!marker) return;
+            const wrapper = marker.closest('div[data-testid="stVerticalBlockBorderWrapper"]');
+            if (!wrapper) return;
+
+            const candidates = [
+                wrapper,
+                wrapper.parentElement,
+                ...Array.from(wrapper.querySelectorAll("div")),
+                ...Array.from(wrapper.parentElement ? wrapper.parentElement.querySelectorAll("div") : []),
+            ].filter(Boolean);
+            const scrollables = candidates.filter((element) => {
+                const style = window.parent.getComputedStyle(element);
+                return element.scrollHeight > element.clientHeight + 4
+                    && style.display !== "none"
+                    && style.visibility !== "hidden";
+            });
+            for (const element of scrollables) {
+                element.scrollTop = element.scrollHeight;
+            }
+            const lastMessage = wrapper.querySelector('[data-testid="stChatMessage"]:last-of-type') || marker;
+            lastMessage.scrollIntoView({ block: "end", inline: "nearest" });
+        };
+
+        const installChatAutoScroll = () => {
+            const doc = window.parent.document;
+            const marker = Array.from(doc.querySelectorAll(".hka-chat-window-marker")).pop();
+            if (!marker) return;
+            const wrapper = marker.closest('div[data-testid="stVerticalBlockBorderWrapper"]');
+            if (!wrapper) return;
+
+            if (window.parent.__hkaChatScrollObserver) {
+                window.parent.__hkaChatScrollObserver.disconnect();
+            }
+            window.parent.__hkaChatScrollObserver = new MutationObserver(() => scrollLatestChat());
+            window.parent.__hkaChatScrollObserver.observe(wrapper, {
+                childList: true,
+                subtree: true,
+                characterData: true,
+            });
+            setTimeout(() => {
+                if (window.parent.__hkaChatScrollObserver) {
+                    window.parent.__hkaChatScrollObserver.disconnect();
+                    window.parent.__hkaChatScrollObserver = null;
+                }
+            }, 15000);
+        };
+
+        [0, 50, 150, 350, 750, 1500].forEach((delay) => setTimeout(scrollLatestChat, delay));
+        setTimeout(installChatAutoScroll, 25);
+        </script>
+        """,
+        height=0,
+    )
+
+
 def render_chat_page() -> None:
     render_page_title("Chat")
+    pending_query = st.session_state.pop("pending_chat_query", None)
     with st.container(height=620, border=True):
-        chat_content = st.empty()
-        with chat_content.container():
-            render_chat_messages()
-
-    with st.form("chat-query-form", clear_on_submit=True):
-        input_columns = st.columns([8, 1])
-        query = input_columns[0].text_input(
-            "Message",
-            placeholder="Ask a question about healthcare knowledge",
-            label_visibility="collapsed",
-        )
-        submitted = input_columns[1].form_submit_button("Send", use_container_width=True)
-
-    if submitted:
-        cleaned_query = query.strip()
-        if not cleaned_query:
-            return
-        st.session_state.setdefault("messages", []).append({"role": "user", "content": cleaned_query})
-        with chat_content.container():
-            render_chat_messages()
-            progress_placeholder = st.empty()
+        if pending_query:
+            st.session_state.setdefault("messages", []).append({"role": "user", "content": pending_query})
+        progress_placeholder = render_chat_messages()
+        if pending_query:
+            scroll_chat_to_latest()
             try:
-                submit_chat_query_with_progress(cleaned_query, progress_placeholder)
+                submit_chat_query_with_progress(pending_query, progress_placeholder)
             except Exception as exc:
                 st.error(f"Chat failed: {exc}")
+                scroll_chat_to_latest()
                 return
+            scroll_chat_to_latest()
+            st.rerun()
+    query = st.chat_input("Ask a question about healthcare knowledge")
+    if query and query.strip():
+        st.session_state.pending_chat_query = query.strip()
+        scroll_chat_to_latest()
         st.rerun()
+    scroll_chat_to_latest()
 
 
 def render_login_page() -> None:
