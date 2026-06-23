@@ -41,10 +41,12 @@ from .models import (
     ChatResponse,
     ChatSessionDetail,
     ChatSessionSummary,
+    GuardianNewsResponse,
     LoginRequest,
     LoginResponse,
     Source,
 )
+from .news import GuardianNewsService
 from .observability import ObservabilityClient
 from .retrieval import RetrievalService
 from .secrets import EnvSecretProvider, SecretProvider
@@ -106,6 +108,11 @@ def get_observability() -> ObservabilityClient:
     return ObservabilityClient(get_settings(), get_secret_provider())
 
 
+@lru_cache
+def get_news_service() -> GuardianNewsService:
+    return GuardianNewsService(get_settings())
+
+
 def create_ingestion_job():
     settings = get_settings()
     if settings.use_local_resources():
@@ -142,7 +149,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="Dstrmaysam Healthcare Knowledge Agent",
+    title="Healthcare Knowledge Agent",
     version="0.1.0",
     lifespan=lifespan,
 )
@@ -575,6 +582,11 @@ def health() -> dict[str, object]:
         "registered_tools": agent.registered_tool_names(),
         "warmup": agent.warmup_status(),
     }
+
+
+@app.get("/news", response_model=GuardianNewsResponse)
+def guardian_news() -> GuardianNewsResponse:
+    return GuardianNewsResponse(**get_news_service().get_payload())
 
 
 @app.post("/auth/login", response_model=LoginResponse)

@@ -178,7 +178,7 @@ class SimplePdf:
 
 
 def add_title(pdf: SimplePdf) -> None:
-    pdf.text("Dstrmaysam Healthcare Knowledge Agent", size=20, font="F2", y=720)
+    pdf.text("Healthcare Knowledge Agent", size=20, font="F2", y=720)
     pdf.text("System Feature Guide", size=18, font="F2", y=694)
     pdf.text("Generated for stakeholder and delivery review", size=11, y=670)
     pdf.text("Current implementation snapshot: 2026-06-23", size=10, y=650)
@@ -510,7 +510,7 @@ def add_conclusion(pdf: SimplePdf) -> None:
 
 
 def build() -> None:
-    pdf = SimplePdf("Dstrmaysam Healthcare Knowledge Agent - System Feature Guide")
+    pdf = SimplePdf("Healthcare Knowledge Agent - System Feature Guide")
     add_title(pdf)
     add_section_overview(pdf)
     add_deployment(pdf)

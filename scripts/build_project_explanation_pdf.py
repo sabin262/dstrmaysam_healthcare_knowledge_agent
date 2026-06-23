@@ -176,7 +176,7 @@ def header_footer(canvas, doc):
     width, height = LETTER
     canvas.setFont("Helvetica-Bold", 8)
     canvas.setFillColor(MUTED)
-    canvas.drawString(inch, height - 0.55 * inch, "Dstrmaysam Healthcare Knowledge Agent")
+    canvas.drawString(inch, height - 0.55 * inch, "Healthcare Knowledge Agent")
     canvas.setStrokeColor(colors.HexColor("#D9E2EC"))
     canvas.setLineWidth(0.5)
     canvas.line(inch, height - 0.64 * inch, width - inch, height - 0.64 * inch)
@@ -302,7 +302,7 @@ def code_block(text: str):
 
 def build_story():
     story = []
-    story.extend([p("Dstrmaysam Healthcare Knowledge Agent", "title")])
+    story.extend([p("Healthcare Knowledge Agent", "title")])
     story.append(
         p(
             "Detailed project explanation for the FastAPI, Streamlit, LangChain, Azure OpenAI, AWS, Langfuse, and RAGAS MVP.",
@@ -354,7 +354,7 @@ def build_story():
     story.extend(section("1. Executive Overview"))
     story.append(
         p(
-            "The Dstrmaysam Healthcare Knowledge Agent is a containerized application that lets employees ask questions against company knowledge. It combines a Streamlit chat interface, a FastAPI backend, a LangChain agent, Azure OpenAI, AWS storage and hosting services, Langfuse observability, and RAGAS evaluation.",
+            "The Healthcare Knowledge Agent is a containerized application that lets employees ask questions against company knowledge. It combines a Streamlit chat interface, a FastAPI backend, a LangChain agent, Azure OpenAI, AWS storage and hosting services, Langfuse observability, and RAGAS evaluation.",
         )
     )
     story.append(
@@ -711,7 +711,7 @@ def build_pdf() -> Path:
         rightMargin=inch,
         topMargin=0.82 * inch,
         bottomMargin=0.8 * inch,
-        title="Dstrmaysam Healthcare Knowledge Agent Project Explanation",
+        title="Healthcare Knowledge Agent Project Explanation",
         author="Codex",
         subject="Detailed project explanation",
     )

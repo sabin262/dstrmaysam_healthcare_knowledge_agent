@@ -1,5 +1,6 @@
 import json
 import os
+import html
 from typing import Any
 
 import requests
@@ -7,11 +8,13 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 
+APP_TITLE = "⚕️ Healthcare Knowledge Agent"
 BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000").rstrip("/")
 KNOWN_ROLES = ["admin", "staff", "doctor", "nurse", "pharmacy", "clinical_governance", "manager"]
 MIN_PASSWORD_LENGTH = 8
 AUTH_COOKIE_NAME = "hka_access_token"
 AUTH_COOKIE_DEFAULT_MAX_AGE_SECONDS = 3600
+NEWS_REFRESH_SECONDS = 300
 
 
 def _set_auth_cookie(token: str, max_age_seconds: int) -> None:
@@ -155,6 +158,327 @@ def get_json(path: str, params: dict[str, Any] | None = None) -> dict[str, Any] 
     return response.json()
 
 
+@st.cache_data(ttl=NEWS_REFRESH_SECONDS, show_spinner=False)
+def fetch_news_payload() -> dict[str, Any]:
+    response = requests.get(f"{BACKEND_URL}/news", timeout=20)
+    raise_for_api_error(response)
+    payload = response.json()
+    return payload if isinstance(payload, dict) else {}
+
+
+def get_news_articles() -> list[dict[str, Any]]:
+    try:
+        payload = fetch_news_payload()
+    except Exception:
+        return []
+    articles = payload.get("articles")
+    return [dict(article) for article in articles if isinstance(article, dict)] if isinstance(articles, list) else []
+
+
+def schedule_news_refresh() -> None:
+    components.html(
+        f"""
+        <script>
+        setTimeout(() => window.parent.location.reload(), {NEWS_REFRESH_SECONDS * 1000});
+        </script>
+        """,
+        height=0,
+    )
+
+
+def safe_article_url(article: dict[str, Any]) -> str:
+    url = str(article.get("url") or "").strip()
+    return url if url.startswith(("https://", "http://")) else "#"
+
+
+def render_page_title(title: str) -> None:
+    st.markdown(f'<div class="hka-page-title">{html.escape(title)}</div>', unsafe_allow_html=True)
+
+
+def inject_app_theme() -> None:
+    st.markdown(
+        """
+        <style>
+        :root {
+            --hka-accent: #0f766e;
+            --hka-accent-strong: #0d9488;
+            --hka-surface: #ffffff;
+            --hka-surface-soft: #f2fbf8;
+            --hka-border: #cfe8df;
+            --hka-text: #102a43;
+            --hka-muted: #52606d;
+            --hka-shadow: 0 14px 36px rgba(15, 118, 110, 0.12);
+        }
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --hka-surface: #111827;
+                --hka-surface-soft: #0f2f2b;
+                --hka-border: #245c56;
+                --hka-text: #e5f4f1;
+                --hka-muted: #a7b8b4;
+                --hka-shadow: 0 18px 42px rgba(0, 0, 0, 0.32);
+            }
+        }
+        .stApp {
+            background:
+                radial-gradient(circle at top left, rgba(15, 148, 136, 0.13), transparent 30rem),
+                linear-gradient(135deg, rgba(240, 253, 250, 0.62), rgba(255, 255, 255, 0));
+        }
+        @media (prefers-color-scheme: dark) {
+            .stApp {
+                background:
+                    radial-gradient(circle at top left, rgba(20, 184, 166, 0.12), transparent 30rem),
+                    linear-gradient(135deg, rgba(8, 47, 73, 0.24), rgba(0, 0, 0, 0));
+            }
+        }
+        div[data-testid="stSidebar"] {
+            border-right: 1px solid var(--hka-border);
+        }
+        .block-container,
+        section[data-testid="stMain"] div[data-testid="stMainBlockContainer"],
+        div[data-testid="stAppViewContainer"] .main .block-container {
+            padding-top: 0.25rem !important;
+        }
+        .stButton > button,
+        .stForm button {
+            border-radius: 8px;
+            border-color: var(--hka-accent);
+        }
+        .stForm {
+            border: 1px solid var(--hka-border);
+            border-radius: 8px;
+            box-shadow: var(--hka-shadow);
+            padding: 1.1rem;
+        }
+        .hka-login-title {
+            color: var(--hka-text);
+            font-size: 2rem;
+            font-weight: 720;
+            letter-spacing: 0;
+            line-height: 1.18;
+            margin: 0 auto !important;
+            max-width: 100%;
+            overflow: visible;
+            text-align: center;
+        }
+        .hka-login-header {
+            margin: 0 auto 1.5rem;
+            max-width: min(920px, 92vw);
+            padding-top: clamp(2.75rem, 7vh, 4rem);
+            text-align: center;
+        }
+        .hka-login-subtitle {
+            color: var(--hka-muted);
+            font-size: 1rem;
+            margin: 0.55rem auto 0;
+            max-width: 100%;
+            text-align: center;
+        }
+        .hka-page-title {
+            color: var(--hka-text);
+            font-size: 2rem;
+            font-weight: 720;
+            letter-spacing: 0;
+            line-height: 1.18;
+            margin: 0 auto 0.8rem !important;
+            text-align: center;
+        }
+        .hka-news-grid {
+            display: grid;
+            gap: 16px;
+            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+            margin-top: 16px;
+        }
+        .hka-news-card {
+            background: var(--hka-surface);
+            border: 1px solid var(--hka-border);
+            border-radius: 8px;
+            box-shadow: var(--hka-shadow);
+            color: var(--hka-text);
+            display: flex;
+            flex-direction: column;
+            min-height: 100%;
+            overflow: hidden;
+            text-decoration: none;
+            transition: border-color 160ms ease, transform 160ms ease;
+        }
+        .hka-news-card:hover {
+            border-color: var(--hka-accent-strong);
+            transform: translateY(-2px);
+        }
+        .hka-news-card img {
+            aspect-ratio: 16 / 9;
+            object-fit: cover;
+            width: 100%;
+        }
+        .hka-news-card-content {
+            display: flex;
+            flex: 1;
+            flex-direction: column;
+            gap: 8px;
+            padding: 14px;
+        }
+        .hka-news-meta {
+            color: var(--hka-accent-strong);
+            font-size: 0.72rem;
+            font-weight: 700;
+            text-transform: uppercase;
+        }
+        .hka-news-title {
+            color: var(--hka-text);
+            font-size: 1rem;
+            font-weight: 740;
+            line-height: 1.3;
+        }
+        .hka-news-summary {
+            color: var(--hka-muted);
+            font-size: 0.9rem;
+            line-height: 1.45;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_login_news_carousel() -> None:
+    articles = get_news_articles()
+    if not articles:
+        return
+
+    cards = []
+    for article in articles[:10]:
+        title = html.escape(str(article.get("title") or "Guardian NHS story"))
+        summary = html.escape(str(article.get("summary") or ""))
+        section = html.escape(str(article.get("section") or "NHS"))
+        published = html.escape(str(article.get("published_at") or "")[:10])
+        url = html.escape(safe_article_url(article), quote=True)
+        thumbnail = html.escape(str(article.get("thumbnail") or ""), quote=True)
+        image = f'<img src="{thumbnail}" alt="" />' if thumbnail.startswith(("https://", "http://")) else ""
+        cards.append(
+            f"""
+            <a class="news-card" href="{url}" target="_blank" rel="noopener noreferrer">
+                {image}
+                <span class="meta">{section}{' | ' + published if published else ''}</span>
+                <strong>{title}</strong>
+                <span class="summary">{summary}</span>
+            </a>
+            """
+        )
+
+    carousel_html = f"""
+    <style>
+    :root {{
+        color-scheme: light dark;
+        --news-surface: #ffffff;
+        --news-border: #cfe8df;
+        --news-text: #102a43;
+        --news-muted: #52606d;
+        --news-accent: #0d9488;
+    }}
+    @media (prefers-color-scheme: dark) {{
+        :root {{
+            --news-surface: #111827;
+            --news-border: #245c56;
+            --news-text: #e5f4f1;
+            --news-muted: #a7b8b4;
+            --news-accent: #2dd4bf;
+        }}
+    }}
+    .news-shell {{
+        margin-top: 22px;
+        overflow: hidden;
+        width: 100%;
+    }}
+    .news-track {{
+        display: flex;
+        gap: 14px;
+        width: max-content;
+        animation: scrollNews 55s linear infinite;
+    }}
+    .news-track:hover {{
+        animation-play-state: paused;
+    }}
+    .news-card {{
+        background: var(--news-surface);
+        border: 1px solid var(--news-border);
+        border-radius: 8px;
+        color: var(--news-text);
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        min-height: 230px;
+        padding: 14px;
+        text-decoration: none;
+        width: 285px;
+    }}
+    .news-card img {{
+        aspect-ratio: 16 / 9;
+        border-radius: 6px;
+        object-fit: cover;
+        width: 100%;
+    }}
+    .news-card strong {{
+        font: 700 15px/1.32 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }}
+    .news-card .meta {{
+        color: var(--news-accent);
+        font: 600 11px/1.2 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        text-transform: uppercase;
+    }}
+    .news-card .summary {{
+        color: var(--news-muted);
+        font: 13px/1.4 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }}
+    @keyframes scrollNews {{
+        from {{ transform: translateX(0); }}
+        to {{ transform: translateX(-50%); }}
+    }}
+    </style>
+    <div class="news-shell">
+        <div class="news-track">
+            {''.join(cards)}
+            {''.join(cards)}
+        </div>
+    </div>
+    """
+    components.html(carousel_html, height=290, scrolling=False)
+
+
+def news_card_html(article: dict[str, Any]) -> str:
+    title = html.escape(str(article.get("title") or "Guardian NHS story"))
+    summary = html.escape(str(article.get("summary") or ""))
+    section = html.escape(str(article.get("section") or "NHS"))
+    published = html.escape(str(article.get("published_at") or "")[:10])
+    url = html.escape(safe_article_url(article), quote=True)
+    thumbnail = html.escape(str(article.get("thumbnail") or ""), quote=True)
+    meta = f"{section} | {published}" if published else section
+    image = f'<img src="{thumbnail}" alt="" />' if thumbnail.startswith(("https://", "http://")) else ""
+    return (
+        f'<a class="hka-news-card" href="{url}" target="_blank" rel="noopener noreferrer">'
+        f"{image}"
+        '<span class="hka-news-card-content">'
+        f'<span class="hka-news-meta">{meta}</span>'
+        f'<span class="hka-news-title">{title}</span>'
+        f'<span class="hka-news-summary">{summary}</span>'
+        "</span>"
+        "</a>"
+    )
+
+
+def render_news_page() -> None:
+    schedule_news_refresh()
+    render_page_title("NHS news")
+    articles = get_news_articles()
+    if not articles:
+        st.info("No NHS news articles are available right now.")
+        return
+    st.markdown(
+        f'<div class="hka-news-grid">{"".join(news_card_html(article) for article in articles)}</div>',
+        unsafe_allow_html=True,
+    )
+
+
 def warm_document_manifest_cache() -> None:
     if st.session_state.get("password_change_required"):
         return
@@ -185,7 +509,7 @@ def parse_departments(raw: str) -> list[str]:
 
 
 def render_password_change() -> None:
-    st.subheader("Change password")
+    render_page_title("Change password")
     with st.form("change-password"):
         current_password = st.text_input("Current password", type="password")
         new_password = st.text_input("New password", type="password")
@@ -212,7 +536,7 @@ def render_password_change() -> None:
 
 
 def render_admin_users() -> None:
-    st.header("Users")
+    render_page_title("Users")
     with st.expander("Create user", expanded=True):
         with st.form("create-user"):
             username = st.text_input("Username")
@@ -391,7 +715,7 @@ def tool_latency_rows(tool_timings: list[Any]) -> list[dict[str, Any]]:
 
 
 def render_admin_dashboard() -> None:
-    st.header("Dashboard")
+    render_page_title("Dashboard")
     try:
         payload = get_json("/admin/dashboard?limit=200")
     except Exception as exc:
@@ -611,7 +935,7 @@ def patient_detail_table_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]
 
 
 def render_patient_details_dashboard() -> None:
-    st.header("Patient Details")
+    render_page_title("Patient Details")
     with st.form("patient-details-filters"):
         first_row = st.columns([2, 1, 1])
         query = first_row[0].text_input("Search", placeholder="Name, MRN, NHS number, consultant, clinic")
@@ -707,7 +1031,7 @@ def render_documents_table(documents: list[dict[str, Any]]) -> None:
 
 
 def render_admin_documents() -> None:
-    st.header("Documents")
+    render_page_title("Documents")
     current_documents: list[dict[str, Any]] = list(st.session_state.get("document_cache", []))
     if not st.session_state.get("document_cache_loaded"):
         warm_document_manifest_cache()
@@ -837,6 +1161,7 @@ def render_chat_messages(show_thinking: bool = False) -> None:
 
 
 def render_chat_page() -> None:
+    render_page_title("Chat")
     chat_window = st.empty()
     with chat_window:
         render_chat_messages()
@@ -865,10 +1190,23 @@ def render_chat_page() -> None:
 
 
 def render_login_page() -> None:
-    with st.form("login"):
-        username = st.text_input("Username")
-        password = st.text_input("Password", type="password")
-        submitted = st.form_submit_button("Sign in")
+    st.markdown(
+        f"""
+        <div class="hka-login-header">
+            <div class="hka-login-title">{html.escape(APP_TITLE)}</div>
+            <div class="hka-login-subtitle">
+                Healthcare knowledge, documents, and NHS headlines in one workspace.
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    left, login_column, right = st.columns([3, 2, 3])
+    with login_column:
+        with st.form("login"):
+            username = st.text_input("Username")
+            password = st.text_input("Password", type="password")
+            submitted = st.form_submit_button("Sign in", use_container_width=True)
 
     if submitted:
         try:
@@ -880,6 +1218,8 @@ def render_login_page() -> None:
             st.rerun()
         except Exception as exc:
             st.error(f"Login failed: {exc}")
+    schedule_news_refresh()
+    render_login_news_carousel()
 
 
 def render_common_sidebar() -> None:
@@ -924,6 +1264,12 @@ def render_chat_app_page() -> None:
     render_chat_page()
 
 
+def render_news_app_page() -> None:
+    with st.sidebar:
+        render_common_sidebar()
+    render_news_page()
+
+
 def render_dashboard_app_page() -> None:
     with st.sidebar:
         render_common_sidebar()
@@ -948,8 +1294,8 @@ def render_documents_app_page() -> None:
     render_admin_documents()
 
 
-st.set_page_config(page_title="Dstrmaysam Healthcare Knowledge Agent", page_icon=None, layout="wide")
-st.title("Dstrmaysam Healthcare Knowledge Agent")
+st.set_page_config(page_title=APP_TITLE, page_icon=None, layout="wide")
+inject_app_theme()
 restore_login_from_cookie()
 sync_auth_cookie()
 
@@ -973,6 +1319,7 @@ elif "admin" in st.session_state.get("roles", []):
         {
             "Main": [
                 st.Page(render_chat_app_page, title="Chat", icon=":material/chat:", default=True),
+                st.Page(render_news_app_page, title="News", icon=":material/newspaper:"),
             ],
             "Admin": [
                 st.Page(render_dashboard_app_page, title="Dashboard", icon=":material/dashboard:"),
@@ -989,7 +1336,10 @@ elif "admin" in st.session_state.get("roles", []):
     )
 else:
     pg = st.navigation(
-        [st.Page(render_chat_app_page, title="Chat", icon=":material/chat:", default=True)]
+        [
+            st.Page(render_chat_app_page, title="Chat", icon=":material/chat:", default=True),
+            st.Page(render_news_app_page, title="News", icon=":material/newspaper:"),
+        ]
     )
 
 pg.run()

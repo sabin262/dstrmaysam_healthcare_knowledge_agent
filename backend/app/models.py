@@ -70,6 +70,23 @@ class ChatSessionDetail(BaseModel):
     messages: list[dict[str, Any]]
 
 
+class GuardianNewsArticle(BaseModel):
+    id: str
+    title: str
+    section: str = ""
+    published_at: str = ""
+    summary: str = ""
+    url: str
+    thumbnail: str = ""
+
+
+class GuardianNewsResponse(BaseModel):
+    articles: list[GuardianNewsArticle] = Field(default_factory=list)
+    last_updated: str | None = None
+    refresh_seconds: int = 300
+    error: str | None = None
+
+
 class AdminUserSummary(BaseModel):
     username: str
     roles: list[str]
