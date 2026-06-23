@@ -1170,7 +1170,20 @@ def _chat_request_worker(
         result_queue.put(("error", exc))
 
 
-def submit_chat_query_with_progress(query: str) -> None:
+def render_chat_progress(
+    progress_placeholder: Any,
+    message: str,
+    *,
+    label: str = "Working on your question...",
+    state: str = "running",
+) -> None:
+    with progress_placeholder.container():
+        with st.chat_message("assistant"):
+            with st.status(label, expanded=True, state=state):
+                st.write(message)
+
+
+def submit_chat_query_with_progress(query: str, progress_placeholder: Any) -> None:
     result_queue: "queue.Queue[tuple[str, Any]]" = queue.Queue(maxsize=1)
     headers = api_headers()
     worker = threading.Thread(
@@ -1180,42 +1193,46 @@ def submit_chat_query_with_progress(query: str) -> None:
     )
     worker.start()
 
-    with st.chat_message("assistant"):
-        with st.status("Working on your question...", expanded=True) as status:
-            progress_slot = st.empty()
-            step_index = 0
-            progress_slot.write(CHAT_PROGRESS_MESSAGES[step_index])
-            while worker.is_alive():
-                worker.join(timeout=0.75)
-                if not worker.is_alive():
-                    break
-                step_index = min(step_index + 1, len(CHAT_PROGRESS_MESSAGES) - 1)
-                progress_slot.write(CHAT_PROGRESS_MESSAGES[step_index])
-            status.update(label="Answer ready.", state="complete", expanded=False)
+    step_index = 0
+    render_chat_progress(progress_placeholder, CHAT_PROGRESS_MESSAGES[step_index])
+    while worker.is_alive():
+        worker.join(timeout=0.75)
+        if not worker.is_alive():
+            break
+        step_index = min(step_index + 1, len(CHAT_PROGRESS_MESSAGES) - 1)
+        render_chat_progress(progress_placeholder, CHAT_PROGRESS_MESSAGES[step_index])
+    render_chat_progress(
+        progress_placeholder,
+        "Answer ready.",
+        label="Answer ready.",
+        state="complete",
+    )
 
     state, payload = result_queue.get()
     if state == "error":
+        progress_placeholder.empty()
         raise payload
     st.session_state.session_id = payload["session_id"]
     st.session_state.messages.append({"role": "assistant", "content": payload["answer"]})
 
 
-def render_chat_messages() -> None:
-    with st.container(height=620, border=True):
-        messages = st.session_state.get("messages", [])
-        if not messages:
-            st.info("Ask a question about healthcare knowledge.")
-        for message in messages:
-            role = "assistant" if message.get("role") == "assistant" else "user"
-            with st.chat_message(role):
-                st.markdown(message.get("content", ""))
+def render_chat_messages() -> Any:
+    messages = st.session_state.get("messages", [])
+    if not messages:
+        st.info("Ask a question about healthcare knowledge.")
+    for message in messages:
+        role = "assistant" if message.get("role") == "assistant" else "user"
+        with st.chat_message(role):
+            st.markdown(message.get("content", ""))
+    return st.empty()
 
 
 def render_chat_page() -> None:
     render_page_title("Chat")
-    chat_window = st.empty()
-    with chat_window:
-        render_chat_messages()
+    with st.container(height=620, border=True):
+        chat_content = st.empty()
+        with chat_content.container():
+            render_chat_messages()
 
     with st.form("chat-query-form", clear_on_submit=True):
         input_columns = st.columns([8, 1])
@@ -1231,10 +1248,11 @@ def render_chat_page() -> None:
         if not cleaned_query:
             return
         st.session_state.setdefault("messages", []).append({"role": "user", "content": cleaned_query})
-        with chat_window:
+        with chat_content.container():
             render_chat_messages()
+            progress_placeholder = st.empty()
             try:
-                submit_chat_query_with_progress(cleaned_query)
+                submit_chat_query_with_progress(cleaned_query, progress_placeholder)
             except Exception as exc:
                 st.error(f"Chat failed: {exc}")
                 return
