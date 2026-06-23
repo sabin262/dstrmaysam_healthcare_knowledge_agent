@@ -48,6 +48,51 @@ def _document_payload(record: DocumentRecord) -> dict[str, Any]:
     }
 
 
+def _deterministic_csv_assets(
+    *,
+    documents: DocumentStore,
+    user: HealthcareUserContext,
+    access: HealthcareAccessControl,
+) -> list[dict[str, Any]]:
+    assets: list[dict[str, Any]] = []
+    try:
+        records = access.filter_documents(user, documents.list_documents())
+    except Exception:
+        return assets
+    for record in records:
+        metadata = record.metadata
+        if str(metadata.get("asset_source") or "") != "postgres_uploaded_lookup":
+            continue
+        columns = [str(column) for column in metadata.get("columns") or [] if str(column).strip()]
+        assets.append(
+            {
+                "filename": record.title or record.key.rsplit("/", 1)[-1],
+                "title": record.title,
+                "columns": columns,
+                "row_count": int(metadata.get("row_count") or 0),
+            }
+        )
+    return assets[:20]
+
+
+def _deterministic_tool_description(csv_assets: list[dict[str, Any]]) -> str:
+    base = (
+        "Exact Postgres lookup for patient details, contact information, doctor information, "
+        "department directory data, appointments, wards, formulary facts, and uploaded CSV lookup rows. "
+        "Use this when the user asks for exact structured values, multiple known values to look up, "
+        "or table-like data that can answer the question without document interpretation."
+    )
+    if not csv_assets:
+        return base
+    asset_lines = []
+    for asset in csv_assets[:8]:
+        columns = ", ".join(asset.get("columns") or [])
+        asset_lines.append(
+            f"{asset.get('filename')} ({asset.get('row_count', 0)} rows; columns: {columns or 'unknown'})"
+        )
+    return base + " Available uploaded CSV lookup assets: " + " | ".join(asset_lines)
+
+
 def build_healthcare_agent_tools(
     *,
     retrieval: RetrievalService,
@@ -57,6 +102,12 @@ def build_healthcare_agent_tools(
     safety: HealthcareSafetyGuard,
     deterministic_lookup: DeterministicLookupService | None = None,
 ) -> list[AgentTool]:
+    deterministic_csv_assets = _deterministic_csv_assets(
+        documents=documents,
+        user=user,
+        access=access,
+    )
+
     def document_search(query: str) -> str:
         """Semantic search over approved healthcare documents."""
         hits = access.filter_hits(user, retrieval.search(query))
@@ -144,7 +195,7 @@ def build_healthcare_agent_tools(
                 },
                 indent=2,
             )
-        return deterministic_lookup.lookup(query, user).to_json()
+        return deterministic_lookup.lookup(query, user, csv_assets=deterministic_csv_assets).to_json()
 
     return [
         AgentTool(
@@ -174,10 +225,7 @@ def build_healthcare_agent_tools(
         ),
         AgentTool(
             name="postgres_deterministic_lookup",
-            description=(
-                "Exact Postgres lookup for patient details, contact information, doctor information, "
-                "department directory data, appointments, wards, and formulary facts."
-            ),
+            description=_deterministic_tool_description(deterministic_csv_assets),
             run=postgres_deterministic_lookup,
         ),
         AgentTool(

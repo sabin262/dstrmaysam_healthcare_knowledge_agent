@@ -20,7 +20,7 @@ class FakeDocuments:
 
 
 class FakeDeterministicLookup:
-    def lookup(self, query, user):
+    def lookup(self, query, user, csv_assets=None):
         return LookupResult(
             category="doctors",
             rows=[
@@ -66,6 +66,39 @@ class DeterministicLookupToolTests(unittest.TestCase):
         service = DeterministicLookupService(settings=None)
 
         self.assertEqual(service._classify("which ward is W07?"), "wards")
+
+    def test_manifest_csv_assets_are_selected_from_filename_and_columns(self):
+        service = DeterministicLookupService(settings=None)
+
+        matches = service._matching_csv_assets(
+            "Which doctor is on call today?",
+            [
+                {
+                    "filename": "doctor_rota.csv",
+                    "columns": ["date", "doctor", "status"],
+                    "row_count": 12,
+                },
+                {
+                    "filename": "department_contacts.csv",
+                    "columns": ["department", "phone"],
+                    "row_count": 3,
+                },
+            ],
+        )
+
+        self.assertEqual(matches[0]["filename"], "doctor_rota.csv")
+        self.assertEqual(matches[0]["columns"], ["date", "doctor", "status"])
+        self.assertEqual(matches[0]["row_count"], 12)
+
+    def test_schema_stopwords_remove_table_and_column_words(self):
+        service = DeterministicLookupService(settings=None)
+
+        terms = service._search_terms(
+            "doctor phone for cardiology",
+            {"doctor", "phone", "doctors", "telephone"},
+        )
+
+        self.assertEqual(terms, ["cardiology"])
 
 
 if __name__ == "__main__":

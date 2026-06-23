@@ -82,6 +82,18 @@ class FakeDocuments(DocumentStore):
                 content_type="text/markdown",
                 metadata={"domain": "general", "document_type": "document"},
             ),
+            DocumentRecord(
+                title="doctor_rota.csv",
+                uri="postgres://uploaded_lookup_rows/doctor_rota.csv",
+                key="postgres://uploaded_lookup_rows/doctor_rota.csv",
+                content_type="text/csv",
+                metadata={
+                    "asset_source": "postgres_uploaded_lookup",
+                    "columns": ["date", "doctor", "status"],
+                    "row_count": 1,
+                    "allowed_roles": ["staff", "admin", "doctor"],
+                },
+            ),
         ]
 
     def lookup_table(self, query: str, limit: int = 10):
@@ -135,8 +147,8 @@ class FakeDeterministicLookup:
     def __init__(self):
         self.calls = []
 
-    def lookup(self, query, user):
-        self.calls.append({"query": query, "user": user.user_id})
+    def lookup(self, query, user, csv_assets=None):
+        self.calls.append({"query": query, "user": user.user_id, "csv_assets": list(csv_assets or [])})
         return FakeLookupResult()
 
 
@@ -270,7 +282,7 @@ class AgentContractTests(unittest.TestCase):
         self.assertTrue(status["fast_llm_available"])
         self.assertTrue(status["fast_llm_cache_hit"])
         self.assertIn("llm_warmup_call_ms", status)
-        self.assertEqual(status["document_count"], 3)
+        self.assertEqual(status["document_count"], 4)
         self.assertTrue(agent.warmup_status()["total_ms"] >= 0)
 
     def test_fake_llm_records_one_selected_tool(self):
@@ -515,8 +527,22 @@ class AgentContractTests(unittest.TestCase):
         self.assertEqual(len(fake_llm.messages), 1)
         self.assertEqual(result.metadata["performance"]["agent_mode"], "fast_planned")
 
-    def test_fast_planned_deterministic_path_skips_tool_selection(self):
-        fake_llm = FakeLLM([fake_ai_message("Dr Smith is on call.")])
+    def test_deterministic_lookup_is_chosen_by_llm_not_fast_planned(self):
+        fake_llm = FakeLLM(
+            [
+                fake_ai_message(
+                    tool_calls=[
+                        {
+                            "name": "postgres_deterministic_lookup",
+                            "args": {"query": "Which doctor is on call today?"},
+                            "id": "call-1",
+                        }
+                    ]
+                ),
+                fake_ai_message("Dr Smith is on call."),
+                fake_ai_message("Dr Smith is on call."),
+            ]
+        )
         lookup = FakeDeterministicLookup()
         agent = make_agent(
             fake_llm,
@@ -528,13 +554,33 @@ class AgentContractTests(unittest.TestCase):
 
         self.assertEqual(result.answer, "Dr Smith is on call.")
         self.assertEqual(result.tools_used, ["postgres_deterministic_lookup"])
-        self.assertEqual(len(fake_llm.messages), 1)
+        self.assertEqual(len(fake_llm.messages), 2)
         self.assertEqual(len(lookup.calls), 1)
-        self.assertEqual(result.metadata["performance"]["agent_mode"], "fast_planned")
+        self.assertEqual(result.metadata["performance"]["agent_mode"], "langgraph")
+        self.assertEqual(lookup.calls[0]["csv_assets"][0]["filename"], "doctor_rota.csv")
 
-    def test_fast_planned_multipart_path_runs_tools_and_synthesizes_once(self):
+    def test_multipart_lookup_and_rag_are_chosen_by_llm(self):
         retrieval = FakeRetrieval()
-        fake_llm = FakeLLM([fake_ai_message("Policy context plus Dr Smith on call.")])
+        fake_llm = FakeLLM(
+            [
+                fake_ai_message(
+                    tool_calls=[
+                        {
+                            "name": "rag_search",
+                            "args": {"query": "leave policy"},
+                            "id": "call-1",
+                        },
+                        {
+                            "name": "postgres_deterministic_lookup",
+                            "args": {"query": "which doctor is on call today"},
+                            "id": "call-2",
+                        },
+                    ]
+                ),
+                fake_ai_message("Policy context plus Dr Smith on call."),
+                fake_ai_message("Policy context plus Dr Smith on call."),
+            ]
+        )
         lookup = FakeDeterministicLookup()
         agent = make_agent(
             fake_llm,
@@ -553,9 +599,10 @@ class AgentContractTests(unittest.TestCase):
         )
 
         self.assertEqual(result.tools_used, ["rag_search", "postgres_deterministic_lookup"])
-        self.assertEqual(len(fake_llm.messages), 1)
+        self.assertEqual(len(fake_llm.messages), 2)
         self.assertEqual(len(retrieval.calls), 1)
         self.assertEqual(len(lookup.calls), 1)
+        self.assertEqual(result.metadata["performance"]["agent_mode"], "langgraph")
         self.assertIn("document_catalog", [step["tool"] for step in result.metadata["tool_flow"]])
 
     def test_ambiguous_short_query_uses_langgraph_fallback(self):

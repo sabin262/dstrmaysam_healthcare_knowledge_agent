@@ -4,7 +4,7 @@ import json
 import csv
 import io
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Sequence
 
 from .config import AppSettings
@@ -19,7 +19,28 @@ def _like(term: str) -> str:
     return f"%{term.lower()}%"
 
 
-STOPWORDS = {
+POSTGRES_LOOKUP_TABLES = {
+    "patients",
+    "doctors",
+    "departments",
+    "organization_contacts",
+    "appointments",
+    "wards",
+    "formulary",
+    "uploaded_lookup_rows",
+}
+
+SCHEMA_SYNONYMS = {
+    "appointment": {"appointments", "clinic", "clinics", "slot", "slots", "referral", "referrals"},
+    "contact": {"contacts", "phone", "phones", "telephone", "tel", "email", "bleep", "extension", "ext"},
+    "department": {"departments", "service", "services", "unit", "units", "specialty", "speciality"},
+    "doctor": {"doctors", "physician", "physicians", "consultant", "consultants", "clinician", "clinicians", "dr"},
+    "formulary": {"medicine", "medicines", "drug", "drugs", "dose", "doses", "restricted", "approval"},
+    "patient": {"patients", "mrn", "nhs", "dob"},
+    "ward": {"wards", "bed", "beds", "floor", "ipd", "inpatient"},
+}
+
+BASE_STOPWORDS = {
     "show",
     "is",
     "are",
@@ -69,11 +90,40 @@ STOPWORDS = {
 }
 
 
-def _best_search_term(terms: list[str]) -> str:
+STOPWORDS = BASE_STOPWORDS
+
+
+def _word_variants(word: str) -> set[str]:
+    cleaned = word.strip().lower()
+    if not cleaned:
+        return set()
+    variants = {cleaned}
+    if cleaned.endswith("ies") and len(cleaned) > 3:
+        variants.add(cleaned[:-3] + "y")
+    if cleaned.endswith("s") and len(cleaned) > 3:
+        variants.add(cleaned[:-1])
+    else:
+        variants.add(cleaned + "s")
+    return {variant for variant in variants if len(variant) >= 2}
+
+
+def _expand_stopwords(words: set[str]) -> set[str]:
+    expanded: set[str] = set()
+    for word in words:
+        parts = [part for part in re.split(r"[^A-Za-z0-9]+", word.lower()) if part]
+        for part in parts or [word.lower()]:
+            expanded.update(_word_variants(part))
+            for synonym in SCHEMA_SYNONYMS.get(part, set()):
+                expanded.update(_word_variants(synonym))
+    return expanded
+
+
+def _best_search_term(terms: list[str], stopwords: set[str] | None = None) -> str:
     for term in terms:
         if re.fullmatch(r"(mrn)?\d{4,}|mrn\d+", term.lower()):
             return term
-    useful = [term for term in terms if term.lower() not in STOPWORDS]
+    active_stopwords = STOPWORDS | (stopwords or set())
+    useful = [term for term in terms if term.lower() not in active_stopwords]
     return useful[-1] if useful else (terms[-1] if terms else "")
 
 
@@ -111,6 +161,7 @@ class LookupResult:
     rows: list[dict[str, Any]]
     access_scopes: tuple[str, ...]
     message: str = ""
+    lookup_plan: dict[str, Any] = field(default_factory=dict)
 
     def to_json(self) -> str:
         return json.dumps(
@@ -118,6 +169,7 @@ class LookupResult:
                 "category": self.category,
                 "message": self.message,
                 "access_scopes_applied": list(self.access_scopes),
+                "lookup_plan": self.lookup_plan,
                 "rows": self.rows,
             },
             indent=2,
@@ -130,27 +182,79 @@ class DeterministicLookupService:
 
     def __init__(self, settings: AppSettings):
         self.settings = settings
+        self._schema_stopwords_cache: set[str] | None = None
 
-    def lookup(self, query: str, user: HealthcareUserContext, limit: int = 10) -> LookupResult:
+    def lookup(
+        self,
+        query: str,
+        user: HealthcareUserContext,
+        limit: int = 10,
+        csv_assets: Sequence[dict[str, Any]] | None = None,
+    ) -> LookupResult:
         if not self.settings.deterministic_lookup_enabled:
             return LookupResult("disabled", [], _access_scopes(user), "Deterministic lookup is disabled.")
 
         category = self._classify(query)
         scopes = _access_scopes(user)
+        schema_stopwords = self._schema_stopwords()
+        search_terms = self._search_terms(query, schema_stopwords)
+        selected_assets = self._matching_csv_assets(query, csv_assets or [])
+        selected_filenames = [str(asset.get("filename") or "") for asset in selected_assets if asset.get("filename")]
         try:
-            rows = self._lookup_category(category, query, scopes, limit)
-            uploaded_rows = self._query_uploaded_lookup_rows(query, scopes, max(0, limit - len(rows)))
-            rows = rows + uploaded_rows
+            if selected_filenames:
+                rows = self._query_uploaded_lookup_rows(
+                    query,
+                    scopes,
+                    limit,
+                    source_filenames=selected_filenames,
+                    stopwords=schema_stopwords,
+                )
+                if len(rows) < limit:
+                    rows.extend(
+                        self._lookup_category(
+                            category,
+                            query,
+                            scopes,
+                            limit - len(rows),
+                            stopwords=schema_stopwords,
+                        )
+                    )
+            else:
+                rows = self._lookup_category(category, query, scopes, limit, stopwords=schema_stopwords)
+                uploaded_rows = self._query_uploaded_lookup_rows(
+                    query,
+                    scopes,
+                    max(0, limit - len(rows)),
+                    stopwords=schema_stopwords,
+                )
+                rows = rows + uploaded_rows
         except Exception as exc:
             return LookupResult(
                 category,
                 [],
                 scopes,
                 f"Postgres deterministic lookup failed: {type(exc).__name__}: {exc}",
+                lookup_plan={
+                    "category": category,
+                    "search_terms": search_terms,
+                    "selected_csv_assets": selected_assets,
+                    "source": "postgres",
+                },
             )
 
         message = "No matching rows found." if not rows else f"Found {len(rows)} matching row(s)."
-        return LookupResult(category, rows, scopes, message)
+        return LookupResult(
+            category,
+            rows,
+            scopes,
+            message,
+            lookup_plan={
+                "category": category,
+                "search_terms": search_terms,
+                "selected_csv_assets": selected_assets,
+                "source": "postgres",
+            },
+        )
 
     def ingest_uploaded_csv(
         self,
@@ -236,54 +340,72 @@ class DeterministicLookupService:
         )
 
     def _lookup_category(
-        self, category: str, query: str, scopes: tuple[str, ...], limit: int
+        self,
+        category: str,
+        query: str,
+        scopes: tuple[str, ...],
+        limit: int,
+        *,
+        stopwords: set[str] | None = None,
     ) -> list[dict[str, Any]]:
         terms = _terms(query)
         primary = terms[0] if terms else ""
         with self._connect() as conn:
             with conn.cursor() as cur:
                 if category == "patients":
-                    return self._query_patients(cur, terms, scopes, limit)
+                    return self._query_patients(cur, terms, scopes, limit, stopwords)
                 if category == "doctors":
-                    return self._query_doctors(cur, query, terms, scopes, limit)
+                    return self._query_doctors(cur, query, terms, scopes, limit, stopwords)
                 if category == "departments":
-                    return self._query_departments(cur, terms, scopes, limit)
+                    return self._query_departments(cur, terms, scopes, limit, stopwords)
                 if category == "contacts":
-                    return self._query_contacts(cur, terms, scopes, limit)
+                    return self._query_contacts(cur, terms, scopes, limit, stopwords)
                 if category == "appointments":
-                    return self._query_appointments(cur, terms, scopes, limit)
+                    return self._query_appointments(cur, terms, scopes, limit, stopwords)
                 if category == "wards":
-                    return self._query_wards(cur, terms, scopes, limit)
+                    return self._query_wards(cur, terms, scopes, limit, stopwords)
                 if category == "formulary":
-                    return self._query_formulary(cur, terms, scopes, limit)
-                return self._query_directory(cur, primary, scopes, limit)
+                    return self._query_formulary(cur, terms, scopes, limit, stopwords)
+                return self._query_directory(cur, primary, scopes, limit, stopwords)
 
     def _query_uploaded_lookup_rows(
         self,
         query: str,
         scopes: tuple[str, ...],
         limit: int,
+        *,
+        source_filenames: Sequence[str] | None = None,
+        stopwords: set[str] | None = None,
     ) -> list[dict[str, Any]]:
         if limit <= 0:
             return []
-        terms = [term for term in _terms(query) if term not in STOPWORDS]
+        terms = self._search_terms(query, stopwords or set())
         if not terms:
             return []
         patterns = [_like(term) for term in terms[:8]]
         where = " OR ".join(["lower(searchable_text) LIKE %s" for _ in patterns])
+        filename_filter = ""
+        params: list[Any] = [list(scopes)]
+        if source_filenames:
+            filename_filter = "AND source_filename = ANY(%s)"
+            params.append(list(source_filenames))
+        params.extend(patterns)
+        fetch_limit = max(limit, min(limit * 5, 100))
+        params.append(fetch_limit)
         with self._connect() as conn:
             with conn.cursor() as cur:
                 self._ensure_uploaded_lookup_table(cur)
                 cur.execute(
                     f"""
-                    SELECT source_filename, row_number, row_data, access_level
+                    SELECT source_filename, row_number, row_data, access_level, searchable_text
                     FROM uploaded_lookup_rows
                     WHERE {self._access_sql()}
+                      {filename_filter}
                       AND ({where})
                     ORDER BY source_filename, row_number
                     LIMIT %s
                     """,
-                    (list(scopes), *patterns, limit),
+                    tuple(params),
                 )
                 rows = []
                 for row in cur.fetchall():
@@ -301,9 +423,86 @@ class DeterministicLookupService:
                             "row_number": row_dict.get("row_number"),
                             "row": payload,
                             "access_level": row_dict.get("access_level"),
+                            "_match_score": sum(
+                                1
+                                for term in terms
+                                if term in str(row_dict.get("searchable_text") or "").lower()
+                            ),
                         }
                     )
-                return rows
+                rows.sort(
+                    key=lambda row: (
+                        -int(row.get("_match_score") or 0),
+                        str(row.get("source_filename") or ""),
+                        int(row.get("row_number") or 0),
+                    )
+                )
+                for row in rows:
+                    row.pop("_match_score", None)
+                return rows[:limit]
+
+    def _schema_stopwords(self) -> set[str]:
+        if self._schema_stopwords_cache is not None:
+            return set(self._schema_stopwords_cache)
+        words = set(STOPWORDS) | set(POSTGRES_LOOKUP_TABLES)
+        try:
+            with self._connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT table_name, column_name
+                        FROM information_schema.columns
+                        WHERE table_schema = 'public'
+                          AND table_name = ANY(%s)
+                        """,
+                        (list(POSTGRES_LOOKUP_TABLES),),
+                    )
+                    for row in cur.fetchall():
+                        words.add(str(row.get("table_name") or ""))
+                        words.add(str(row.get("column_name") or ""))
+        except Exception:
+            pass
+        self._schema_stopwords_cache = _expand_stopwords(words)
+        return set(self._schema_stopwords_cache)
+
+    def _search_terms(self, query: str, stopwords: set[str]) -> list[str]:
+        active_stopwords = STOPWORDS | stopwords
+        return [term for term in _terms(query) if term.lower() not in active_stopwords]
+
+    def _matching_csv_assets(
+        self,
+        query: str,
+        csv_assets: Sequence[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        query_terms = set(_terms(query))
+        if not query_terms:
+            return []
+        matches: list[tuple[int, dict[str, Any]]] = []
+        for asset in csv_assets:
+            filename = str(asset.get("filename") or asset.get("title") or "")
+            columns = [str(column) for column in asset.get("columns") or []]
+            haystack_text = " ".join([filename, *columns])
+            haystack_terms = set(_terms(haystack_text))
+            haystack_terms.update(
+                term.lower()
+                for term in re.split(r"[^A-Za-z0-9]+", haystack_text)
+                if len(term) >= 2
+            )
+            score = sum(1 for term in query_terms if term in haystack_terms)
+            if score:
+                matches.append(
+                    (
+                        score,
+                        {
+                            "filename": filename,
+                            "title": str(asset.get("title") or filename),
+                            "columns": columns[:20],
+                            "row_count": int(asset.get("row_count") or 0),
+                        },
+                    )
+                )
+        matches.sort(key=lambda item: (-item[0], item[1]["filename"]))
+        return [asset for _, asset in matches[:5]]
 
     def _classify(self, query: str) -> str:
         q = query.lower()
@@ -555,8 +754,8 @@ class DeterministicLookupService:
             row["table"] = row.pop("source_table", "appointments")
         return rows
 
-    def _query_patients(self, cur, terms: list[str], scopes: tuple[str, ...], limit: int):
-        pattern = _like(_best_search_term(terms))
+    def _query_patients(self, cur, terms: list[str], scopes: tuple[str, ...], limit: int, stopwords: set[str] | None = None):
+        pattern = _like(_best_search_term(terms, stopwords))
         cur.execute(
             f"""
             SELECT p.patient_id, p.mrn, p.nhs_number, p.full_name, p.date_of_birth, p.ward_code,
@@ -573,8 +772,8 @@ class DeterministicLookupService:
         )
         return list(cur.fetchall())
 
-    def _query_doctors(self, cur, query: str, terms: list[str], scopes: tuple[str, ...], limit: int):
-        pattern = _like(_best_search_term(terms))
+    def _query_doctors(self, cur, query: str, terms: list[str], scopes: tuple[str, ...], limit: int, stopwords: set[str] | None = None):
+        pattern = _like(_best_search_term(terms, stopwords))
         on_call_only = "on call" in query.lower() or "on-call" in query.lower()
         cur.execute(
             f"""
@@ -591,8 +790,8 @@ class DeterministicLookupService:
         )
         return list(cur.fetchall())
 
-    def _query_departments(self, cur, terms: list[str], scopes: tuple[str, ...], limit: int):
-        pattern = _like(_best_search_term(terms))
+    def _query_departments(self, cur, terms: list[str], scopes: tuple[str, ...], limit: int, stopwords: set[str] | None = None):
+        pattern = _like(_best_search_term(terms, stopwords))
         cur.execute(
             f"""
             SELECT department_id, department_name, specialty_group, location, main_phone,
@@ -607,8 +806,8 @@ class DeterministicLookupService:
         )
         return list(cur.fetchall())
 
-    def _query_contacts(self, cur, terms: list[str], scopes: tuple[str, ...], limit: int):
-        pattern = _like(_best_search_term(terms))
+    def _query_contacts(self, cur, terms: list[str], scopes: tuple[str, ...], limit: int, stopwords: set[str] | None = None):
+        pattern = _like(_best_search_term(terms, stopwords))
         cur.execute(
             f"""
             SELECT contact_id, contact_type, department_name, contact_name, role,
@@ -624,8 +823,8 @@ class DeterministicLookupService:
         )
         return list(cur.fetchall())
 
-    def _query_appointments(self, cur, terms: list[str], scopes: tuple[str, ...], limit: int):
-        pattern = _like(_best_search_term(terms))
+    def _query_appointments(self, cur, terms: list[str], scopes: tuple[str, ...], limit: int, stopwords: set[str] | None = None):
+        pattern = _like(_best_search_term(terms, stopwords))
         cur.execute(
             f"""
             SELECT appointment_id, patient_mrn, patient_name, clinic_name, department_name,
@@ -641,8 +840,8 @@ class DeterministicLookupService:
         )
         return list(cur.fetchall())
 
-    def _query_wards(self, cur, terms: list[str], scopes: tuple[str, ...], limit: int):
-        pattern = _like(_best_search_term(terms))
+    def _query_wards(self, cur, terms: list[str], scopes: tuple[str, ...], limit: int, stopwords: set[str] | None = None):
+        pattern = _like(_best_search_term(terms, stopwords))
         cur.execute(
             f"""
             SELECT ward_code, ward_name, department_name, floor, bed_capacity,
@@ -657,8 +856,8 @@ class DeterministicLookupService:
         )
         return list(cur.fetchall())
 
-    def _query_formulary(self, cur, terms: list[str], scopes: tuple[str, ...], limit: int):
-        pattern = _like(_best_search_term(terms))
+    def _query_formulary(self, cur, terms: list[str], scopes: tuple[str, ...], limit: int, stopwords: set[str] | None = None):
+        pattern = _like(_best_search_term(terms, stopwords))
         cur.execute(
             f"""
             SELECT medicine_id, medicine_name, category, restricted, approval_required,
@@ -673,8 +872,8 @@ class DeterministicLookupService:
         )
         return list(cur.fetchall())
 
-    def _query_directory(self, cur, primary: str, scopes: tuple[str, ...], limit: int):
-        pattern = _like(primary)
+    def _query_directory(self, cur, primary: str, scopes: tuple[str, ...], limit: int, stopwords: set[str] | None = None):
+        pattern = _like(primary if primary and primary not in (stopwords or set()) else "")
         cur.execute(
             f"""
             SELECT 'department' AS result_type, department_name AS name, service_lead AS role,
