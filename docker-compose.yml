@@ -86,15 +86,16 @@ services:
       - backend
 
   postgres:
-    #image: postgres:16-alpine
-    image: 666127452756.dkr.ecr.eu-west-2.amazonaws.com/dstrmaysam-healthcare-knowledge-agent-dev:postgres16_alpine
+    build:
+      context: ./database
+      dockerfile: Dockerfile
+    image: 666127452756.dkr.ecr.eu-west-2.amazonaws.com/dstrmaysam-healthcare-knowledge-agent-dev:latest_postgres
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-healthcare_agent}
       POSTGRES_USER: ${POSTGRES_USER:-healthcare_agent}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-healthcare_agent_dev}
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./database/init:/docker-entrypoint-initdb.d:ro
     ports:
       - "5432:5432"
     healthcheck:
