@@ -1,6 +1,8 @@
 import json
 import os
 import html
+import queue
+import threading
 from typing import Any
 
 import requests
@@ -15,6 +17,11 @@ MIN_PASSWORD_LENGTH = 8
 AUTH_COOKIE_NAME = "hka_access_token"
 AUTH_COOKIE_DEFAULT_MAX_AGE_SECONDS = 3600
 NEWS_REFRESH_SECONDS = 300
+CHAT_PROGRESS_MESSAGES = [
+    "Reviewing the question and choosing the right data source.",
+    "Checking structured lookup data and indexed documents if needed.",
+    "Preparing a concise answer.",
+]
 
 
 def _set_auth_cookie(token: str, max_age_seconds: int) -> None:
@@ -779,7 +786,6 @@ def render_admin_dashboard() -> None:
                 "Sources": item.get("source_count", 0),
                 "Tokens": item.get("total_tokens", 0),
                 "Latency ms": item.get("latency_ms", 0),
-                "Latency breakdown": item.get("latency_breakdown_summary", ""),
                 "Faithfulness": format_score((item.get("ragas") or {}).get("ragas_faithfulness")),
                 "Relevancy": format_score((item.get("ragas") or {}).get("ragas_answer_relevancy")),
                 "Context precision": format_score((item.get("ragas") or {}).get("ragas_context_precision")),
@@ -1145,26 +1151,88 @@ def submit_chat_query(query: str) -> None:
     st.session_state.messages.append({"role": "assistant", "content": data["answer"]})
 
 
-def render_chat_messages(show_thinking: bool = False) -> None:
-    with st.container(height=620, border=True):
-        messages = st.session_state.get("messages", [])
-        if not messages:
-            st.info("Ask a question about healthcare knowledge.")
-        for message in messages:
-            role = "assistant" if message.get("role") == "assistant" else "user"
-            with st.chat_message(role):
-                st.markdown(message.get("content", ""))
-        if show_thinking:
-            with st.chat_message("assistant"):
-                with st.spinner("Thinking with knowledge context..."):
-                    st.write("Preparing answer...")
+def _chat_request_worker(
+    query: str,
+    session_id: str | None,
+    headers: dict[str, str],
+    result_queue: "queue.Queue[tuple[str, Any]]",
+) -> None:
+    try:
+        response = requests.post(
+            f"{BACKEND_URL}/chat",
+            json={"query": query, "session_id": session_id},
+            headers=headers,
+            timeout=120,
+        )
+        raise_for_api_error(response)
+        result_queue.put(("ok", response.json()))
+    except Exception as exc:
+        result_queue.put(("error", exc))
+
+
+def render_chat_progress(
+    progress_placeholder: Any,
+    message: str,
+    *,
+    label: str = "Working on your question...",
+    state: str = "running",
+) -> None:
+    with progress_placeholder.container():
+        with st.chat_message("assistant"):
+            with st.status(label, expanded=True, state=state):
+                st.write(message)
+
+
+def submit_chat_query_with_progress(query: str, progress_placeholder: Any) -> None:
+    result_queue: "queue.Queue[tuple[str, Any]]" = queue.Queue(maxsize=1)
+    headers = api_headers()
+    worker = threading.Thread(
+        target=_chat_request_worker,
+        args=(query, st.session_state.get("session_id"), headers, result_queue),
+        daemon=True,
+    )
+    worker.start()
+
+    step_index = 0
+    render_chat_progress(progress_placeholder, CHAT_PROGRESS_MESSAGES[step_index])
+    while worker.is_alive():
+        worker.join(timeout=0.75)
+        if not worker.is_alive():
+            break
+        step_index = min(step_index + 1, len(CHAT_PROGRESS_MESSAGES) - 1)
+        render_chat_progress(progress_placeholder, CHAT_PROGRESS_MESSAGES[step_index])
+    render_chat_progress(
+        progress_placeholder,
+        "Answer ready.",
+        label="Answer ready.",
+        state="complete",
+    )
+
+    state, payload = result_queue.get()
+    if state == "error":
+        progress_placeholder.empty()
+        raise payload
+    st.session_state.session_id = payload["session_id"]
+    st.session_state.messages.append({"role": "assistant", "content": payload["answer"]})
+
+
+def render_chat_messages() -> Any:
+    messages = st.session_state.get("messages", [])
+    if not messages:
+        st.info("Ask a question about healthcare knowledge.")
+    for message in messages:
+        role = "assistant" if message.get("role") == "assistant" else "user"
+        with st.chat_message(role):
+            st.markdown(message.get("content", ""))
+    return st.empty()
 
 
 def render_chat_page() -> None:
     render_page_title("Chat")
-    chat_window = st.empty()
-    with chat_window:
-        render_chat_messages()
+    with st.container(height=620, border=True):
+        chat_content = st.empty()
+        with chat_content.container():
+            render_chat_messages()
 
     with st.form("chat-query-form", clear_on_submit=True):
         input_columns = st.columns([8, 1])
@@ -1180,13 +1248,15 @@ def render_chat_page() -> None:
         if not cleaned_query:
             return
         st.session_state.setdefault("messages", []).append({"role": "user", "content": cleaned_query})
-        with chat_window:
-            render_chat_messages(show_thinking=True)
-        try:
-            submit_chat_query(cleaned_query)
-            st.rerun()
-        except Exception as exc:
-            st.error(f"Chat failed: {exc}")
+        with chat_content.container():
+            render_chat_messages()
+            progress_placeholder = st.empty()
+            try:
+                submit_chat_query_with_progress(cleaned_query, progress_placeholder)
+            except Exception as exc:
+                st.error(f"Chat failed: {exc}")
+                return
+        st.rerun()
 
 
 def render_login_page() -> None:

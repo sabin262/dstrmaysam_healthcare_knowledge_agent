@@ -68,6 +68,7 @@ class AppSettings:
     postgres_password: str = "healthcare_agent_dev"
     postgres_sslmode: str = "disable"
     deterministic_lookup_enabled: bool = True
+    deterministic_lookup_multipart_first_enabled: bool = False
     guardian_api_key: str = ""
     guardian_news_refresh_seconds: int = 300
     guardian_news_page_size: int = 10
@@ -146,6 +147,9 @@ class AppSettings:
             postgres_password=_env("POSTGRES_PASSWORD", "healthcare_agent_dev"),
             postgres_sslmode=_env("POSTGRES_SSLMODE", "disable"),
             deterministic_lookup_enabled=_env_bool("DETERMINISTIC_LOOKUP_ENABLED", True),
+            deterministic_lookup_multipart_first_enabled=_env_bool(
+                "DETERMINISTIC_LOOKUP_MULTIPART_FIRST_ENABLED", False
+            ),
             guardian_api_key=_env("GUARDIAN_API_KEY", ""),
             guardian_news_refresh_seconds=int(_env("GUARDIAN_NEWS_REFRESH_SECONDS", "300")),
             guardian_news_page_size=int(_env("GUARDIAN_NEWS_PAGE_SIZE", "10")),
@@ -195,6 +199,9 @@ class AppSettings:
             "postgres_port": self.postgres_port,
             "postgres_db": self.postgres_db,
             "deterministic_lookup_enabled": str(self.deterministic_lookup_enabled),
+            "deterministic_lookup_multipart_first_enabled": str(
+                self.deterministic_lookup_multipart_first_enabled
+            ),
             "guardian_api_configured": str(bool(self.guardian_api_key)),
             "guardian_news_refresh_seconds": self.guardian_news_refresh_seconds,
             "guardian_news_page_size": self.guardian_news_page_size,

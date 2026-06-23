@@ -1309,7 +1309,11 @@ class KnowledgeAgent:
         query: str,
         initial_safety: dict[str, Any],
     ) -> str:
-        planned_tools = _planned_tool_names(query)
+        multipart_lookup_rule = (
+            "- For multipart questions that include exact structured values and document/policy context, call deterministic lookup before RAG search.\n"
+            if self.settings.deterministic_lookup_multipart_first_enabled
+            else "- For multipart questions, choose the tool order that best answers the user with the fewest required calls.\n"
+        )
         return (
             "Conversation history:\n"
             f"{history_context}\n\n"
@@ -1317,12 +1321,12 @@ class KnowledgeAgent:
             f"{json.dumps(initial_safety, indent=2)}\n\n"
             "User question:\n"
             f"{query}\n\n"
-            "Tool selection plan:\n"
-            f"{json.dumps(planned_tools)}\n\n"
             "Tool selection rules:\n"
             "- Use RAG document search for policy, procedure, SOP, guideline, privacy, confidentiality, and governance questions.\n"
-            "- Use deterministic Postgres lookup for exact structured facts such as doctors on call, patients, appointments, wards, contacts, departments, and formulary rows.\n"
+            "- Use deterministic Postgres lookup for exact structured facts such as doctors on call, patients, appointments, wards, contacts, departments, CSV lookup rows, and formulary rows.\n"
+            "- If the deterministic lookup result fully answers the question, answer from that result without calling extra tools.\n"
             "- If a multipart question needs more than one tool, call every relevant tool and combine the results into one answer.\n"
+            f"{multipart_lookup_rule}"
             "- Do not choose deterministic lookup just because a policy question contains words such as patient or department.\n\n"
             "Use tools when they can improve factual accuracy. "
             "Answer with citations when sources are present."
@@ -1515,12 +1519,9 @@ class KnowledgeAgent:
         if not self.settings.chat_fast_planned_execution_enabled:
             return []
         planned_tools = _planned_tool_names(query)
-        supported_tools = {"rag_search", "postgres_deterministic_lookup"}
-        if not planned_tools or any(tool not in supported_tools for tool in planned_tools):
-            return []
         if planned_tools == ["rag_search"]:
             return planned_tools if self._should_use_fast_rag(query) else []
-        return planned_tools
+        return []
 
     def _call_fast_planned_agent(
         self,
