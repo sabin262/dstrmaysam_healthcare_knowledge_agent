@@ -16,6 +16,7 @@ from .auth import (
     AuthService,
     AuthenticationError,
     AuthorizationError,
+    KNOWN_USER_ROLES,
     PasswordChangeRequiredError,
     UserManagementError,
 )
@@ -27,6 +28,7 @@ from .ingest import IngestionJob, checksum_bytes
 from .local_chroma import LocalChromaIngestionJob, LocalChromaRetrievalService
 from .models import (
     AdminDocumentUploadResponse,
+    AdminDocumentMetadataUpdateRequest,
     AdminIngestionResponse,
     AdminDeleteIndexesRequest,
     AdminDeleteIndexesResponse,
@@ -53,6 +55,7 @@ from .storage import DocumentStore, LocalDocumentStore
 
 
 SUPPORTED_UPLOAD_EXTENSIONS = {".pdf", ".docx", ".txt", ".md", ".csv"}
+DOCUMENT_METADATA_VALUE_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_:-]{0,63}$")
 DASHBOARD_RANGE_WINDOWS = {
     "30m": timedelta(minutes=30),
     "1h": timedelta(hours=1),
@@ -228,6 +231,41 @@ def _safe_upload_filename(filename: str | None) -> str:
 def _raw_document_key(filename: str) -> str:
     prefix = get_settings().s3_raw_prefix.strip("/")
     return f"{prefix}/{filename}" if prefix else filename
+
+
+def _normalize_document_metadata_value(value: str, field_name: str) -> str:
+    normalized = re.sub(r"[^a-z0-9_:-]+", "_", str(value).strip().lower()).strip("_:-")
+    if not normalized or not DOCUMENT_METADATA_VALUE_PATTERN.match(normalized):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid document {field_name}",
+        )
+    return normalized
+
+
+def _normalize_document_roles(roles: list[str]) -> list[str]:
+    normalized = sorted({str(role).strip().lower() for role in roles if str(role).strip()})
+    if not normalized:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="At least one access role is required")
+    unknown_roles = [role for role in normalized if role not in KNOWN_USER_ROLES]
+    if unknown_roles:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unknown access role(s): {', '.join(unknown_roles)}",
+        )
+    return normalized
+
+
+def _document_record_payload(document) -> dict[str, object]:
+    return {
+        "title": document.title,
+        "key": document.key,
+        "uri": document.uri,
+        "content_type": document.content_type,
+        "metadata": dict(document.metadata or {}),
+        "chunk_count": int(document.chunk_count or 0),
+        "ingestion_status": document.ingestion_status or "",
+    }
 
 
 def _csv_manifest_record(filename: str, data: bytes, rows_inserted: int, content_type: str) -> dict[str, object]:
@@ -765,6 +803,55 @@ async def upload_admin_document(
     )
 
 
+@app.patch("/admin/documents/metadata")
+def update_admin_document_metadata(
+    request: AdminDocumentMetadataUpdateRequest,
+    user: HealthcareUserContext = Depends(admin_user_context),
+) -> dict[str, object]:
+    category = _normalize_document_metadata_value(request.category, "category")
+    document_type = _normalize_document_metadata_value(request.document_type, "type")
+    allowed_roles = _normalize_document_roles(request.allowed_roles)
+    try:
+        document_store = get_document_store()
+        documents = document_store.list_documents()
+        target = next(
+            (
+                document
+                for document in documents
+                if document.key == request.key or document.uri == request.key or document.title == request.key
+            ),
+            None,
+        )
+        if target is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+        metadata = dict(target.metadata or {})
+        metadata["domain"] = category
+        metadata["document_type"] = document_type
+        metadata["allowed_roles"] = allowed_roles
+        updated_record = {
+            "title": target.title,
+            "key": target.key,
+            "uri": target.uri,
+            "content_type": target.content_type,
+            "metadata": metadata,
+            "chunk_count": int(target.chunk_count or 0),
+            "ingestion_status": target.ingestion_status or "",
+        }
+        if not hasattr(document_store, "upsert_manifest_record"):
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Document manifest is read-only")
+        document_store.upsert_manifest_record(updated_record)
+        if hasattr(document_store, "invalidate_manifest_cache"):
+            document_store.invalidate_manifest_cache()
+        agent = get_agent()
+        if hasattr(agent, "invalidate_caches"):
+            agent.invalidate_caches()
+        return updated_record
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+
+
 @app.post("/admin/documents/delete-indexes", response_model=AdminDeleteIndexesResponse)
 def delete_admin_document_indexes(
     request: AdminDeleteIndexesRequest,
@@ -1063,14 +1150,6 @@ def get_chat_session(session_id: str, user_id: str = Depends(current_user)) -> C
 def documents(user: HealthcareUserContext = Depends(active_user_context)) -> list[dict[str, object]]:
     agent = get_agent()
     return [
-        {
-            "title": document.title,
-            "key": document.key,
-            "uri": document.uri,
-            "content_type": document.content_type,
-            "metadata": document.metadata,
-            "chunk_count": document.chunk_count,
-            "ingestion_status": document.ingestion_status,
-        }
+        _document_record_payload(document)
         for document in agent.access.filter_documents(user, get_document_store().list_documents())
     ]

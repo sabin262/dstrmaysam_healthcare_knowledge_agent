@@ -31,6 +31,24 @@ DASHBOARD_RANGE_OPTIONS = [
     ("7 days", "7d"),
     ("all time", "all"),
 ]
+DOCUMENT_CATEGORY_OPTIONS = [
+    "general",
+    "clinical_policy",
+    "admin_policy",
+    "compliance",
+    "governance",
+    "operations",
+    "deterministic_lookup",
+]
+DOCUMENT_TYPE_OPTIONS = [
+    "document",
+    "policy",
+    "sop",
+    "pathway",
+    "guideline",
+    "procedure",
+    "csv_table",
+]
 
 
 def _set_auth_cookie(token: str, max_age_seconds: int) -> None:
@@ -1103,18 +1121,108 @@ def document_table_rows(documents: list[dict[str, Any]]) -> list[dict[str, Any]]
     for document in documents:
         metadata = document.get("metadata") or {}
         key = document.get("key") or str(document.get("uri", "")).split("/", 3)[-1]
+        roles = metadata.get("allowed_roles") or []
+        if isinstance(roles, str):
+            roles = [roles]
         rows.append(
             {
                 "File": document.get("title") or str(key).rsplit("/", 1)[-1],
-                "Key": key,
                 "Chunks": document.get("chunk_count", 0),
                 "Category": metadata.get("domain", "general"),
                 "Type": metadata.get("document_type", "document"),
+                "Access roles": ", ".join(str(role) for role in roles),
                 "Status": document.get("ingestion_status") or "indexed",
                 "URI": document.get("uri", ""),
             }
         )
     return rows
+
+
+def _metadata_options(options: list[str], current_value: str) -> list[str]:
+    value = (current_value or "").strip()
+    if value and value not in options:
+        return [value, *options]
+    return list(options)
+
+
+def _option_index(options: list[str], current_value: str, default: str) -> int:
+    value = current_value if current_value in options else default
+    try:
+        return options.index(value)
+    except ValueError:
+        return 0
+
+
+def _update_cached_document(updated_document: dict[str, Any]) -> None:
+    updated_key = updated_document.get("key")
+    documents = []
+    replaced = False
+    for document in st.session_state.get("document_cache", []):
+        if document.get("key") == updated_key:
+            documents.append(updated_document)
+            replaced = True
+        else:
+            documents.append(document)
+    if not replaced:
+        documents.append(updated_document)
+    st.session_state.document_cache = documents
+    st.session_state.document_cache_loaded = True
+    st.session_state.document_cache_error = None
+
+
+def render_document_metadata_editor(documents: list[dict[str, Any]]) -> None:
+    st.subheader("Document metadata")
+    for index, document in enumerate(documents):
+        metadata = document.get("metadata") or {}
+        title = document.get("title") or document.get("key") or document.get("uri") or "Untitled"
+        current_category = str(metadata.get("domain") or "general")
+        current_type = str(metadata.get("document_type") or "document")
+        raw_roles = metadata.get("allowed_roles", [])
+        if isinstance(raw_roles, str):
+            raw_roles = [raw_roles]
+        current_roles = [role for role in raw_roles if role in KNOWN_ROLES]
+        category_options = _metadata_options(DOCUMENT_CATEGORY_OPTIONS, current_category)
+        type_options = _metadata_options(DOCUMENT_TYPE_OPTIONS, current_type)
+        with st.expander(str(title)):
+            st.caption(document.get("uri", ""))
+            with st.form(f"document-metadata-{index}"):
+                category = st.selectbox(
+                    "Category",
+                    category_options,
+                    index=_option_index(category_options, current_category, "general"),
+                )
+                document_type = st.selectbox(
+                    "Document type",
+                    type_options,
+                    index=_option_index(type_options, current_type, "document"),
+                )
+                allowed_roles = st.multiselect(
+                    "Access roles",
+                    KNOWN_ROLES,
+                    default=current_roles or ["staff"],
+                )
+                submitted = st.form_submit_button("Save metadata")
+            if submitted:
+                if not allowed_roles:
+                    st.error("Select at least one access role")
+                    continue
+                try:
+                    updated = patch_json(
+                        "/admin/documents/metadata",
+                        {
+                            "key": document.get("key") or document.get("uri") or title,
+                            "category": category,
+                            "document_type": document_type,
+                            "allowed_roles": allowed_roles,
+                        },
+                    )
+                    _update_cached_document(updated)
+                    st.session_state.document_metadata_notice = (
+                        "Document metadata updated. Run ingestion to apply metadata changes to indexed search chunks."
+                    )
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Metadata update failed: {exc}")
 
 
 def render_documents_table(documents: list[dict[str, Any]]) -> None:
@@ -1131,6 +1239,7 @@ def render_documents_table(documents: list[dict[str, Any]]) -> None:
         len({str(row.get("Category") or "general") for row in rows}),
     )
     st.dataframe(rows, hide_index=True, use_container_width=True)
+    render_document_metadata_editor(documents)
 
 
 def render_admin_documents() -> None:
@@ -1141,6 +1250,9 @@ def render_admin_documents() -> None:
         current_documents = list(st.session_state.get("document_cache", []))
     if st.session_state.get("document_cache_error"):
         st.error(f"Unable to load indexed documents: {st.session_state.document_cache_error}")
+    document_metadata_notice = st.session_state.pop("document_metadata_notice", None)
+    if document_metadata_notice:
+        st.success(document_metadata_notice)
 
     uploaded_files = st.file_uploader(
         "Upload documents to S3",

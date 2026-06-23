@@ -426,6 +426,45 @@ class AdminDocumentApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 403)
         self.assertEqual(self.documents.uploads, [])
 
+    def test_admin_can_update_document_metadata(self):
+        response = self.client.patch(
+            "/admin/documents/metadata",
+            headers=self.headers_for("admin", "adminpass1"),
+            json={
+                "key": "raw/policy.md",
+                "category": "clinical_policy",
+                "document_type": "sop",
+                "allowed_roles": ["doctor", "admin"],
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["key"], "raw/policy.md")
+        self.assertEqual(payload["metadata"]["domain"], "clinical_policy")
+        self.assertEqual(payload["metadata"]["document_type"], "sop")
+        self.assertEqual(payload["metadata"]["allowed_roles"], ["admin", "doctor"])
+        updated_document = self.documents.list_documents()[0]
+        self.assertEqual(updated_document.metadata["domain"], "clinical_policy")
+        self.assertEqual(updated_document.metadata["document_type"], "sop")
+        self.assertEqual(updated_document.metadata["allowed_roles"], ["admin", "doctor"])
+        self.assertTrue(self.agent.invalidated)
+
+    def test_document_metadata_rejects_unknown_role(self):
+        response = self.client.patch(
+            "/admin/documents/metadata",
+            headers=self.headers_for("admin", "adminpass1"),
+            json={
+                "key": "raw/policy.md",
+                "category": "clinical_policy",
+                "document_type": "sop",
+                "allowed_roles": ["doctor", "superuser"],
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("Unknown access role", response.json()["detail"])
+
     def test_unsupported_upload_extension_returns_400(self):
         response = self.client.post(
             "/admin/documents/upload",
