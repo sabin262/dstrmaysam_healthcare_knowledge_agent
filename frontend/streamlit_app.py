@@ -131,7 +131,7 @@ def post_json(path: str, payload: dict[str, Any]) -> dict[str, Any]:
         f"{BACKEND_URL}{path}",
         json=payload,
         headers=api_headers(),
-        timeout=120,
+        timeout=300,
     )
     raise_for_api_error(response)
     return response.json()
@@ -142,7 +142,7 @@ def post_file(path: str, field_name: str, filename: str, data: bytes, content_ty
         f"{BACKEND_URL}{path}",
         files={field_name: (filename, data, content_type)},
         headers=api_headers(),
-        timeout=120,
+        timeout=300,
     )
     raise_for_api_error(response)
     return response.json()
@@ -1162,7 +1162,7 @@ def _chat_request_worker(
             f"{BACKEND_URL}/chat",
             json={"query": query, "session_id": session_id},
             headers=headers,
-            timeout=120,
+            timeout=300,
         )
         raise_for_api_error(response)
         result_queue.put(("ok", response.json()))

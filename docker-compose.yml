@@ -2,6 +2,7 @@ services:
   backend:
     build:
       context: ./backend
+    image: 666127452756.dkr.ecr.eu-west-2.amazonaws.com/dstrmaysam-healthcare-knowledge-agent-dev:latest_backend
     environment:
       APP_ENV: local
       AWS_REGION: ${AWS_REGION:-eu-west-2}
@@ -76,6 +77,7 @@ services:
   frontend:
     build:
       context: ./frontend
+    image: 666127452756.dkr.ecr.eu-west-2.amazonaws.com/dstrmaysam-healthcare-knowledge-agent-dev:latest_frontend
     environment:
       BACKEND_URL: ${BACKEND_URL:-http://backend:8000}
     ports:
@@ -84,7 +86,8 @@ services:
       - backend
 
   postgres:
-    image: postgres:16-alpine
+    #image: postgres:16-alpine
+    image: 666127452756.dkr.ecr.eu-west-2.amazonaws.com/dstrmaysam-healthcare-knowledge-agent-dev:postgres16_alpine
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-healthcare_agent}
       POSTGRES_USER: ${POSTGRES_USER:-healthcare_agent}

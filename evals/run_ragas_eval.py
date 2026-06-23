@@ -29,7 +29,7 @@ def post_chat(api_url: str, token: str, question: str) -> dict[str, Any]:
         },
         method="POST",
     )
-    with urllib.request.urlopen(request, timeout=120) as response:
+    with urllib.request.urlopen(request, timeout=500) as response:
         return json.loads(response.read().decode("utf-8"))
 
 
