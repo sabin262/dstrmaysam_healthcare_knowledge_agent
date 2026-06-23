@@ -29,11 +29,12 @@ def settings(**overrides):
 
 
 class FakeOpenSearchClient:
-    def __init__(self, responses=None):
+    def __init__(self, responses=None, index_exists=True):
         self.search_calls = []
         self.msearch_calls = []
         self.delete_calls = []
         self.responses = list(responses or [])
+        self.indices = FakeIndices(index_exists)
 
     def search(self, index, body):
         self.search_calls.append({"index": index, "body": body})
@@ -46,6 +47,25 @@ class FakeOpenSearchClient:
             {"index": index, "body": body, "refresh": refresh, "conflicts": conflicts}
         )
         return {"deleted": 5}
+
+
+class FakeIndices:
+    def __init__(self, exists=True, fail_first_create=False):
+        self._exists = exists
+        self.fail_first_create = fail_first_create
+        self.exists_calls = []
+        self.create_calls = []
+
+    def exists(self, index):
+        self.exists_calls.append(index)
+        return self._exists
+
+    def create(self, index, body):
+        self.create_calls.append({"index": index, "body": body})
+        if self.fail_first_create and len(self.create_calls) == 1:
+            raise ValueError("unsupported mapping")
+        self._exists = True
+        return {"acknowledged": True}
 
 
 class FakeMSearchOpenSearchClient(FakeOpenSearchClient):
@@ -103,6 +123,44 @@ class RetrievalQueryTests(unittest.TestCase):
         body = service._opensearch.search_calls[-1]["body"]
         self.assertIn("multi_match", body["query"])
         self.assertNotIn("bool", body["query"])
+
+    def test_missing_opensearch_index_is_created_before_search(self):
+        app_settings = settings(rag_neighbor_chunks=0)
+        service = RetrievalService(
+            app_settings,
+            StaticSecretProvider(app_settings, {"/test/app": {"session_secret": "secret"}}),
+        )
+        service._opensearch = FakeOpenSearchClient(index_exists=False)
+        service._embed_query = lambda query: None
+
+        service.search("leave policy")
+
+        self.assertEqual(service._opensearch.indices.exists_calls, ["idx"])
+        self.assertEqual(service._opensearch.indices.create_calls[0]["index"], "idx")
+        self.assertEqual(service._opensearch.indices.create_calls[0]["body"]["settings"], {"index.knn": True})
+        self.assertEqual(
+            service._opensearch.indices.create_calls[0]["body"]["mappings"]["properties"]["embedding"]["dimension"],
+            1536,
+        )
+        self.assertEqual(service.last_timing_ms["index_created"], 1)
+
+    def test_missing_opensearch_index_falls_back_to_minimal_mapping(self):
+        app_settings = settings(rag_neighbor_chunks=0)
+        service = RetrievalService(
+            app_settings,
+            StaticSecretProvider(app_settings, {"/test/app": {"session_secret": "secret"}}),
+        )
+        service._opensearch = FakeOpenSearchClient(index_exists=False)
+        service._opensearch.indices.fail_first_create = True
+        service._embed_query = lambda query: None
+
+        service.search("leave policy")
+
+        self.assertEqual(len(service._opensearch.indices.create_calls), 2)
+        fallback_body = service._opensearch.indices.create_calls[1]["body"]
+        self.assertEqual(fallback_body["settings"], {"index.knn": True})
+        self.assertNotIn("method", fallback_body["mappings"]["properties"]["embedding"])
+        self.assertEqual(service.last_timing_ms["index_created"], 1)
 
     def test_vector_search_merges_keyword_results_and_fetches_neighbors(self):
         responses = [

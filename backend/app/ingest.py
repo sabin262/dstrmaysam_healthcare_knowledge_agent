@@ -9,6 +9,7 @@ from typing import Any
 
 from .aws import boto3_client, boto3_session
 from .config import AppSettings
+from .opensearch_index import ensure_opensearch_index
 from .retries import retry_transient
 from .secrets import SecretProvider
 
@@ -156,6 +157,7 @@ class IngestionJob:
         self.s3 = boto3_client(settings, "s3")
         self._embeddings: Any | None = None
         self._opensearch: Any | None = None
+        self._opensearch_index_checked = False
 
     @retry_transient
     def run(self) -> dict[str, Any]:
@@ -274,6 +276,7 @@ class IngestionJob:
 
     def _index_chunk(self, document: ParsedDocument, chunk: str, chunk_index: int) -> None:
         client = self._get_opensearch()
+        self._ensure_index(client)
         embedding = self._embed(chunk)
         doc_id = hashlib.sha256(f"{document.key}:{chunk_index}:{document.checksum}".encode()).hexdigest()
         body = {
@@ -292,6 +295,7 @@ class IngestionJob:
 
     def _delete_document_chunks(self, key: str) -> int:
         client = self._get_opensearch()
+        self._ensure_index(client)
         try:
             response = client.delete_by_query(
                 index=self.settings.opensearch_index,
@@ -337,7 +341,15 @@ class IngestionJob:
             verify_certs=True,
             connection_class=RequestsHttpConnection,
         )
+        self._ensure_index(self._opensearch)
         return self._opensearch
+
+    def _ensure_index(self, client: Any) -> bool:
+        if getattr(self, "_opensearch_index_checked", False):
+            return False
+        created = ensure_opensearch_index(client, self.settings.opensearch_index)
+        self._opensearch_index_checked = True
+        return created
 
 
 def main() -> int:

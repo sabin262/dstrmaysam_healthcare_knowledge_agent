@@ -339,6 +339,8 @@ def _metric_ms(performance: dict[str, object], key: str) -> int:
 def _tool_timing_totals(tool_timings: list[dict[str, object]]) -> dict[str, int]:
     totals: dict[str, int] = {
         "tool_count": len(tool_timings),
+        "index_check_ms": 0,
+        "index_created": 0,
         "catalog_ms": 0,
         "retrieval_search_ms": 0,
         "embedding_ms": 0,
@@ -417,6 +419,7 @@ def _dashboard_latency_breakdown(
         + _metric_ms(performance, "llm_final_ms")
         + _metric_ms(performance, "llm_direct_answer_ms"),
         "catalog_ms": _metric_ms(performance, "catalog_ms"),
+        "index_check_ms": _metric_ms(performance, "index_check_ms"),
         "retrieval_search_ms": _metric_ms(performance, "retrieval_search_ms"),
         "embedding_ms": _metric_ms(performance, "embedding_ms"),
         "opensearch_ms": _metric_ms(performance, "opensearch_ms"),
@@ -464,6 +467,8 @@ def _dashboard_latency_breakdown(
         },
         "retrieval_and_catalog": {
             "catalog_ms": _metric_ms(performance, "catalog_ms"),
+            "index_check_ms": _metric_ms(performance, "index_check_ms"),
+            "index_created": tool_totals["index_created"],
             "retrieval_search_ms": _metric_ms(performance, "retrieval_search_ms"),
             "embedding_ms": _metric_ms(performance, "embedding_ms"),
             "opensearch_ms": _metric_ms(performance, "opensearch_ms"),
