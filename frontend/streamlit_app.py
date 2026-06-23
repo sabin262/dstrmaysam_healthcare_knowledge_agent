@@ -1154,20 +1154,28 @@ def submit_chat_query(query: str) -> None:
 def _chat_request_worker(
     query: str,
     session_id: str | None,
+    headers: dict[str, str],
     result_queue: "queue.Queue[tuple[str, Any]]",
 ) -> None:
     try:
-        data = post_json("/chat", {"query": query, "session_id": session_id})
-        result_queue.put(("ok", data))
+        response = requests.post(
+            f"{BACKEND_URL}/chat",
+            json={"query": query, "session_id": session_id},
+            headers=headers,
+            timeout=120,
+        )
+        raise_for_api_error(response)
+        result_queue.put(("ok", response.json()))
     except Exception as exc:
         result_queue.put(("error", exc))
 
 
 def submit_chat_query_with_progress(query: str) -> None:
     result_queue: "queue.Queue[tuple[str, Any]]" = queue.Queue(maxsize=1)
+    headers = api_headers()
     worker = threading.Thread(
         target=_chat_request_worker,
-        args=(query, st.session_state.get("session_id"), result_queue),
+        args=(query, st.session_state.get("session_id"), headers, result_queue),
         daemon=True,
     )
     worker.start()
