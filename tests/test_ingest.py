@@ -57,9 +57,10 @@ class FakeS3:
 
 
 class FakeOpenSearch:
-    def __init__(self):
+    def __init__(self, index_exists=True):
         self.indexes = []
         self.deletes = []
+        self.indices = FakeIndices(index_exists)
 
     def index(self, index, id, body, refresh=False):
         self.indexes.append({"index": index, "id": id, "body": body, "refresh": refresh})
@@ -69,6 +70,25 @@ class FakeOpenSearch:
             {"index": index, "body": body, "refresh": refresh, "conflicts": conflicts}
         )
         return {"deleted": 2}
+
+
+class FakeIndices:
+    def __init__(self, exists=True, fail_first_create=False):
+        self._exists = exists
+        self.fail_first_create = fail_first_create
+        self.exists_calls = []
+        self.create_calls = []
+
+    def exists(self, index):
+        self.exists_calls.append(index)
+        return self._exists
+
+    def create(self, index, body):
+        self.create_calls.append({"index": index, "body": body})
+        if self.fail_first_create and len(self.create_calls) == 1:
+            raise ValueError("unsupported mapping")
+        self._exists = True
+        return {"acknowledged": True}
 
 
 def make_job(s3, opensearch=None, app_settings=None):
@@ -183,6 +203,36 @@ class IncrementalIngestionTests(unittest.TestCase):
         self.assertEqual(result["documents"][0]["ingestion_status"], "indexed")
         self.assertEqual(opensearch.deletes[0]["body"], {"query": {"term": {"key": "raw/leave.md"}}})
         self.assertEqual(opensearch.indexes[0]["body"]["key"], "raw/leave.md")
+
+    def test_missing_opensearch_index_is_created_before_indexing(self):
+        opensearch = FakeOpenSearch(index_exists=False)
+        job = make_job(FakeS3({"raw/leave.md": b"# Leave policy"}), opensearch)
+
+        result = job.run()
+
+        self.assertEqual(result["indexed_documents"], 1)
+        self.assertEqual(opensearch.indices.exists_calls, ["idx"])
+        self.assertEqual(opensearch.indices.create_calls[0]["index"], "idx")
+        self.assertEqual(opensearch.indices.create_calls[0]["body"]["settings"], {"index.knn": True})
+        self.assertEqual(
+            opensearch.indices.create_calls[0]["body"]["mappings"]["properties"]["embedding"]["type"],
+            "knn_vector",
+        )
+        self.assertEqual(opensearch.indexes[0]["index"], "idx")
+
+    def test_missing_opensearch_index_uses_fallback_mapping_when_rich_mapping_fails(self):
+        opensearch = FakeOpenSearch(index_exists=False)
+        opensearch.indices.fail_first_create = True
+        job = make_job(FakeS3({"raw/leave.md": b"# Leave policy"}), opensearch)
+
+        result = job.run()
+
+        self.assertEqual(result["indexed_documents"], 1)
+        self.assertEqual(len(opensearch.indices.create_calls), 2)
+        fallback_body = opensearch.indices.create_calls[1]["body"]
+        self.assertEqual(fallback_body["settings"], {"index.knn": True})
+        self.assertNotIn("method", fallback_body["mappings"]["properties"]["embedding"])
+        self.assertEqual(fallback_body["mappings"]["properties"]["metadata"]["type"], "object")
 
     def test_removed_manifest_file_deletes_stale_chunks(self):
         manifest = {

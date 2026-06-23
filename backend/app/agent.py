@@ -165,6 +165,8 @@ def _add_tool_timing(performance: dict[str, Any], guidance: list[dict[str, Any]]
         tool_timings.append(
             {
                 "tool": item.get("tool"),
+                "index_check_ms": int(timing.get("index_check_ms", 0)),
+                "index_created": int(timing.get("index_created", 0)),
                 "catalog_ms": int(timing.get("catalog_ms", 0)),
                 "retrieval_search_ms": int(timing.get("retrieval_search_ms", 0)),
                 "embedding_ms": int(timing.get("embedding_ms", 0)),
@@ -180,6 +182,7 @@ def _add_tool_timing(performance: dict[str, Any], guidance: list[dict[str, Any]]
         )
         for key in (
             "catalog_ms",
+            "index_check_ms",
             "retrieval_search_ms",
             "embedding_ms",
             "opensearch_ms",
@@ -203,6 +206,8 @@ def _sum_metrics_ms(performance: dict[str, Any], keys: tuple[str, ...]) -> int:
 def _tool_timing_totals(tool_timings: list[dict[str, Any]]) -> dict[str, int]:
     totals: dict[str, int] = {
         "tool_count": len(tool_timings),
+        "index_check_ms": 0,
+        "index_created": 0,
         "catalog_ms": 0,
         "retrieval_search_ms": 0,
         "embedding_ms": 0,
@@ -267,6 +272,7 @@ def _latency_breakdown(performance: dict[str, Any], total_ms: int) -> dict[str, 
         "llm_final_ms": _metric_ms(performance, "llm_final_ms"),
         "llm_direct_answer_ms": _metric_ms(performance, "llm_direct_answer_ms"),
         "catalog_ms": _metric_ms(performance, "catalog_ms"),
+        "index_check_ms": _metric_ms(performance, "index_check_ms"),
         "retrieval_search_ms": _metric_ms(performance, "retrieval_search_ms"),
         "embedding_ms": _metric_ms(performance, "embedding_ms"),
         "opensearch_ms": _metric_ms(performance, "opensearch_ms"),
@@ -319,6 +325,8 @@ def _latency_breakdown(performance: dict[str, Any], total_ms: int) -> dict[str, 
         },
         "retrieval_and_catalog": {
             "catalog_ms": _metric_ms(performance, "catalog_ms"),
+            "index_check_ms": _metric_ms(performance, "index_check_ms"),
+            "index_created": tool_totals["index_created"],
             "retrieval_search_ms": _metric_ms(performance, "retrieval_search_ms"),
             "embedding_ms": _metric_ms(performance, "embedding_ms"),
             "opensearch_ms": _metric_ms(performance, "opensearch_ms"),

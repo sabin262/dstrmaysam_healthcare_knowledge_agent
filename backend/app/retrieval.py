@@ -8,6 +8,7 @@ from typing import Any, Sequence
 
 from .aws import boto3_session
 from .config import AppSettings
+from .opensearch_index import ensure_opensearch_index
 from .retries import retry_transient
 from .secrets import SecretProvider
 
@@ -26,6 +27,7 @@ class RetrievalService:
         self.settings = settings
         self.secret_provider = secret_provider
         self._opensearch: Any | None = None
+        self._opensearch_index_checked = False
         self._embedding_model: Any | None = None
         self._embedding_deployment_name: str = ""
         self._embedding_cache: OrderedDict[tuple[str, str], list[float]] = OrderedDict()
@@ -53,6 +55,10 @@ class RetrievalService:
             self.last_timing_ms = {"total_ms": int((time.perf_counter() - started) * 1000)}
             return []
         client = self._get_opensearch_client()
+        index_create_started = time.perf_counter()
+        created_index = self._ensure_index(client)
+        timing["index_check_ms"] = int((time.perf_counter() - index_create_started) * 1000)
+        timing["index_created"] = 1 if created_index else 0
         embedding_started = time.perf_counter()
         vector = self._embed_query(query)
         timing["embedding_ms"] = int((time.perf_counter() - embedding_started) * 1000)
@@ -271,7 +277,15 @@ class RetrievalService:
             verify_certs=True,
             connection_class=RequestsHttpConnection,
         )
+        self._ensure_index(self._opensearch)
         return self._opensearch
+
+    def _ensure_index(self, client: Any) -> bool:
+        if self._opensearch_index_checked:
+            return False
+        created = ensure_opensearch_index(client, self.settings.opensearch_index)
+        self._opensearch_index_checked = True
+        return created
 
     def _embed_query(self, query: str) -> list[float] | None:
         try:
@@ -340,6 +354,7 @@ class RetrievalService:
             self.invalidate_cache()
             return 0
         client = self._get_opensearch_client()
+        self._ensure_index(client)
         try:
             response = client.delete_by_query(
                 index=self.settings.opensearch_index,

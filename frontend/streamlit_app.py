@@ -373,6 +373,8 @@ def tool_latency_rows(tool_timings: list[Any]) -> list[dict[str, Any]]:
             {
                 "Tool": item.get("tool", ""),
                 "Total ms": int(item.get("total_ms") or 0),
+                "Index check ms": int(item.get("index_check_ms") or 0),
+                "Index created": int(item.get("index_created") or 0),
                 "Catalog ms": int(item.get("catalog_ms") or 0),
                 "Retrieval ms": int(item.get("retrieval_search_ms") or 0),
                 "Embedding ms": int(item.get("embedding_ms") or 0),
@@ -512,6 +514,7 @@ def render_admin_dashboard() -> None:
                         "fast_llm_setup_ms": "Fast LLM setup",
                         "langfuse_callbacks_ms": "Langfuse callbacks",
                         "catalog_ms": "Document catalog",
+                        "index_check_ms": "OpenSearch index check",
                         "retrieval_search_ms": "Retrieval search",
                         "embedding_ms": "Embedding",
                         "opensearch_ms": "OpenSearch",
