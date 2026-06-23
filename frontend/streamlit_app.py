@@ -336,15 +336,28 @@ def inject_app_theme() -> None:
             line-height: 1.45;
         }
         div[data-testid="stVerticalBlockBorderWrapper"]:has(.hka-chat-window-marker) {
-            height: calc(100dvh - 9.5rem) !important;
-            min-height: 360px !important;
-            max-height: calc(100dvh - 9.5rem) !important;
+            height: calc(100dvh - 11.25rem) !important;
+            min-height: 390px !important;
+            max-height: calc(100dvh - 11.25rem) !important;
+            margin-bottom: 0.65rem !important;
         }
         div[data-testid="stVerticalBlockBorderWrapper"]:has(.hka-chat-window-marker),
         div[data-testid="stVerticalBlockBorderWrapper"]:has(.hka-chat-window-marker) > div,
         div[data-testid="stVerticalBlockBorderWrapper"]:has(.hka-chat-window-marker) div[data-testid="stVerticalBlock"] {
             height: 100% !important;
             overflow-y: auto !important;
+        }
+        div[data-testid="stVerticalBlockBorderWrapper"]:has(.hka-chat-window-marker) div[data-testid="stVerticalBlock"] {
+            padding-bottom: 0.75rem !important;
+        }
+        div[data-testid="stVerticalBlock"]:has(.hka-chat-window-marker) {
+            gap: 0.55rem !important;
+        }
+        div[data-testid="stChatInput"] {
+            margin-top: 0 !important;
+        }
+        div[data-testid="stChatInput"] > div {
+            padding-top: 0.35rem !important;
         }
         </style>
         """,
@@ -1230,7 +1243,9 @@ def render_chat_messages() -> Any:
         role = "assistant" if message.get("role") == "assistant" else "user"
         with st.chat_message(role):
             st.markdown(message.get("content", ""))
-    return st.empty()
+    progress_placeholder = st.empty()
+    st.markdown('<span class="hka-chat-bottom-anchor"></span>', unsafe_allow_html=True)
+    return progress_placeholder
 
 
 def scroll_chat_to_latest() -> None:
@@ -1239,6 +1254,8 @@ def scroll_chat_to_latest() -> None:
         <script>
         const scrollLatestChat = () => {
             const doc = window.parent.document;
+            const anchors = Array.from(doc.querySelectorAll(".hka-chat-bottom-anchor"));
+            const anchor = anchors[anchors.length - 1];
             const markers = Array.from(doc.querySelectorAll(".hka-chat-window-marker"));
             const marker = markers[markers.length - 1];
             if (!marker) return;
@@ -1260,8 +1277,8 @@ def scroll_chat_to_latest() -> None:
             for (const element of scrollables) {
                 element.scrollTop = element.scrollHeight;
             }
-            const lastMessage = wrapper.querySelector('[data-testid="stChatMessage"]:last-of-type') || marker;
-            lastMessage.scrollIntoView({ block: "end", inline: "nearest" });
+            const target = anchor || wrapper.querySelector('[data-testid="stChatMessage"]:last-of-type') || marker;
+            target.scrollIntoView({ block: "end", inline: "nearest" });
         };
 
         const installChatAutoScroll = () => {
@@ -1288,7 +1305,7 @@ def scroll_chat_to_latest() -> None:
             }, 15000);
         };
 
-        [0, 50, 150, 350, 750, 1500].forEach((delay) => setTimeout(scrollLatestChat, delay));
+        [0, 25, 75, 150, 350, 750, 1500, 2500].forEach((delay) => setTimeout(scrollLatestChat, delay));
         setTimeout(installChatAutoScroll, 25);
         </script>
         """,

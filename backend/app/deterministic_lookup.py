@@ -90,6 +90,26 @@ BASE_STOPWORDS = {
     "what",
     "which",
     "who",
+    "does",
+    "do",
+    "did",
+    "has",
+    "have",
+    "had",
+    "any",
+    "if",
+    "whether",
+    "tell",
+    "me",
+    "list",
+    "show",
+    "available",
+    "availability",
+    "scheduled",
+    "schedule",
+    "upcoming",
+    "future",
+    "past",
     "where",
     "when",
     "for",
@@ -166,6 +186,17 @@ def _has_person_name_hint(terms: list[str]) -> bool:
     ]
     name_like_terms = [term for term in useful if re.fullmatch(r"[a-z][a-z'-]+", term.lower())]
     return len(name_like_terms) >= 2
+
+
+def _name_search_terms(terms: list[str], stopwords: set[str] | None = None) -> list[str]:
+    active_stopwords = STOPWORDS | (stopwords or set())
+    useful = [
+        term.lower()
+        for term in terms
+        if term.lower() not in active_stopwords
+        and not re.fullmatch(r"(w\d+|dep-[a-z0-9-]+|\d+)", term.lower())
+    ]
+    return [term for term in useful if re.fullmatch(r"[a-z][a-z'-]+", term)]
 
 
 def _requested_rota_dates(query: str, today: date | None = None) -> list[str]:
@@ -635,6 +666,9 @@ class DeterministicLookupService:
     def _classify(self, query: str) -> str:
         q = query.lower()
         terms = _terms(query)
+        appointment_query = any(marker in q for marker in ["appointment", "appointments", "clinic", "slot", "referral"])
+        if appointment_query:
+            return "appointments"
         patient_location_query = any(
             marker in q for marker in ["ward", "bed", "ipd", "inpatient", "location", "located", "where"]
         )
@@ -650,8 +684,6 @@ class DeterministicLookupService:
             return "departments"
         if any(marker in q for marker in ["contact", "phone", "email", "bleep", "extension"]):
             return "contacts"
-        if any(marker in q for marker in ["appointment", "clinic", "slot", "referral"]):
-            return "appointments"
         if any(marker in q for marker in ["ward", "bed", "floor"]):
             return "wards"
         if any(marker in q for marker in ["medicine", "drug", "formulary", "restricted", "dose"]):
@@ -1095,19 +1127,47 @@ class DeterministicLookupService:
         return list(cur.fetchall())
 
     def _query_appointments(self, cur, terms: list[str], scopes: tuple[str, ...], limit: int, stopwords: set[str] | None = None):
-        pattern = _like(_best_search_term(terms, stopwords))
+        search_terms = _name_search_terms(terms, stopwords)
+        mrn_terms = [term for term in terms if re.fullmatch(r"(mrn)?\d{4,}|mrn\d+", term.lower())]
+        if mrn_terms:
+            search_terms = mrn_terms
+        if not search_terms:
+            best_term = _best_search_term(terms, stopwords)
+            search_terms = [best_term] if best_term else []
+
+        where_parts = [self._qualified_access_sql("a")]
+        params: list[Any] = [list(scopes)]
+        if search_terms:
+            for term in search_terms[:4]:
+                pattern = _like(term)
+                where_parts.append(
+                    """
+                    (
+                        lower(a.patient_name) LIKE %s OR lower(a.patient_mrn) LIKE %s
+                        OR lower(COALESCE(p.full_name, '')) LIKE %s
+                        OR lower(COALESCE(p.patient_id, '')) LIKE %s
+                        OR lower(COALESCE(p.nhs_number, '')) LIKE %s
+                        OR lower(a.clinic_name) LIKE %s
+                        OR lower(a.department_name) LIKE %s
+                        OR lower(a.clinician_name) LIKE %s
+                    )
+                    """
+                )
+                params.extend([pattern] * 8)
+        params.append(limit)
         cur.execute(
             f"""
-            SELECT appointment_id, patient_mrn, patient_name, clinic_name, department_name,
-                   appointment_date, appointment_time, clinician_name, status, referral_priority, access_level
-            FROM appointments
-            WHERE {self._access_sql()}
-              AND (%s = '%%' OR lower(patient_name) LIKE %s OR lower(patient_mrn) LIKE %s
-                   OR lower(clinic_name) LIKE %s OR lower(department_name) LIKE %s)
-            ORDER BY appointment_date, appointment_time
+            SELECT a.appointment_id, a.patient_mrn, a.patient_name, p.patient_id, p.nhs_number,
+                   p.date_of_birth, p.ward_code, a.clinic_name, a.department_name,
+                   a.appointment_date, a.appointment_time, a.clinician_name, a.status,
+                   a.referral_priority, a.access_level
+            FROM appointments a
+            LEFT JOIN patients p ON p.mrn = a.patient_mrn
+            WHERE {" AND ".join(where_parts)}
+            ORDER BY a.appointment_date, a.appointment_time
             LIMIT %s
             """,
-            (list(scopes), pattern, pattern, pattern, pattern, pattern, limit),
+            tuple(params),
         )
         return list(cur.fetchall())
 

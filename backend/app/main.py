@@ -23,7 +23,7 @@ from .auth import (
 from .config import AppSettings
 from .deterministic_lookup import DeterministicLookupService
 from .healthcare import HealthcareUserContext
-from .history import PostgresChatHistoryRepository, create_chat_history_repository
+from .history import create_chat_history_repository
 from .ingest import IngestionJob, checksum_bytes
 from .local_chroma import LocalChromaIngestionJob, LocalChromaRetrievalService
 from .models import (
@@ -77,8 +77,6 @@ def get_auth_service() -> AuthService:
 @lru_cache
 def get_history_repository():
     settings = get_settings()
-    if settings.use_local_resources():
-        return PostgresChatHistoryRepository(settings)
     return create_chat_history_repository(settings)
 
 

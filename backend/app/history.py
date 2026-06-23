@@ -3,12 +3,15 @@ from __future__ import annotations
 import time
 import uuid
 import json
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Protocol
 
 from .aws import boto3_resource
 from .config import AppSettings
+
+logger = logging.getLogger(__name__)
 
 
 def utc_now_iso() -> str:
@@ -64,6 +67,18 @@ class ChatHistoryRepository(Protocol):
     def update_message_metadata_by_trace_id(self, trace_id: str, metadata: dict[str, Any]) -> bool:
         ...
 
+    def save_langfuse_trace_outbox(
+        self,
+        *,
+        trace_id: str,
+        user_id: str,
+        session_id: str,
+        output: dict[str, Any],
+        metadata: dict[str, Any],
+        error: str = "",
+    ) -> None:
+        ...
+
 
 class InMemoryChatHistoryRepository:
     def __init__(self) -> None:
@@ -115,6 +130,18 @@ class InMemoryChatHistoryRepository:
                     message.metadata.update(metadata)
                     return True
         return False
+
+    def save_langfuse_trace_outbox(
+        self,
+        *,
+        trace_id: str,
+        user_id: str,
+        session_id: str,
+        output: dict[str, Any],
+        metadata: dict[str, Any],
+        error: str = "",
+    ) -> None:
+        return None
 
     def _derive_title(self, user_id: str, session_id: str) -> str:
         for message in self._messages.get((user_id, session_id), []):
@@ -269,6 +296,18 @@ class DynamoDBChatHistoryRepository:
             scan_kwargs["ExclusiveStartKey"] = response["LastEvaluatedKey"]
         return False
 
+    def save_langfuse_trace_outbox(
+        self,
+        *,
+        trace_id: str,
+        user_id: str,
+        session_id: str,
+        output: dict[str, Any],
+        metadata: dict[str, Any],
+        error: str = "",
+    ) -> None:
+        return None
+
 
 class PostgresChatHistoryRepository:
     def __init__(self, settings: AppSettings):
@@ -330,6 +369,35 @@ class PostgresChatHistoryRepository:
                     """
                     CREATE INDEX IF NOT EXISTS idx_chat_messages_trace_id
                     ON chat_messages ((metadata->>'trace_id'))
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS langfuse_trace_outbox (
+                        id BIGSERIAL PRIMARY KEY,
+                        trace_id TEXT NOT NULL,
+                        user_id TEXT NOT NULL,
+                        session_id TEXT NOT NULL,
+                        output JSONB NOT NULL,
+                        metadata JSONB NOT NULL,
+                        status TEXT NOT NULL DEFAULT 'pending',
+                        retry_count INTEGER NOT NULL DEFAULT 0,
+                        last_error TEXT,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                    )
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_langfuse_trace_outbox_status
+                    ON langfuse_trace_outbox (status, created_at)
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_langfuse_trace_outbox_trace_id
+                    ON langfuse_trace_outbox (trace_id)
                     """
                 )
             conn.commit()
@@ -492,16 +560,149 @@ class PostgresChatHistoryRepository:
             conn.commit()
         return updated
 
+    def save_langfuse_trace_outbox(
+        self,
+        *,
+        trace_id: str,
+        user_id: str,
+        session_id: str,
+        output: dict[str, Any],
+        metadata: dict[str, Any],
+        error: str = "",
+    ) -> None:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO langfuse_trace_outbox
+                        (trace_id, user_id, session_id, output, metadata, last_error)
+                    VALUES (%s, %s, %s, %s::jsonb, %s::jsonb, %s)
+                    """,
+                    (
+                        trace_id,
+                        user_id,
+                        session_id,
+                        _json_dumps(output),
+                        _json_dumps(metadata),
+                        error,
+                    ),
+                )
+            conn.commit()
+
+
+class FallbackChatHistoryRepository:
+    def __init__(
+        self,
+        primary: ChatHistoryRepository,
+        fallback: ChatHistoryRepository,
+        *,
+        primary_name: str = "primary",
+        fallback_name: str = "fallback",
+    ) -> None:
+        self.primary = primary
+        self.fallback = fallback
+        self.primary_name = primary_name
+        self.fallback_name = fallback_name
+
+    def save_message(self, user_id: str, session_id: str, message: ChatMessage) -> None:
+        try:
+            self.primary.save_message(user_id, session_id, message)
+        except Exception as exc:
+            logger.warning(
+                "Chat history %s save failed; writing to %s: %s",
+                self.primary_name,
+                self.fallback_name,
+                exc,
+            )
+            self.fallback.save_message(user_id, session_id, message)
+
+    def load_messages(self, user_id: str, session_id: str, limit: int = 50) -> list[ChatMessage]:
+        try:
+            return self.primary.load_messages(user_id, session_id, limit)
+        except Exception as exc:
+            logger.warning(
+                "Chat history %s load failed; reading from %s: %s",
+                self.primary_name,
+                self.fallback_name,
+                exc,
+            )
+            return self.fallback.load_messages(user_id, session_id, limit)
+
+    def list_sessions(self, user_id: str, limit: int = 25) -> list[ChatSession]:
+        try:
+            return self.primary.list_sessions(user_id, limit)
+        except Exception as exc:
+            logger.warning(
+                "Chat history %s session list failed; reading from %s: %s",
+                self.primary_name,
+                self.fallback_name,
+                exc,
+            )
+            return self.fallback.list_sessions(user_id, limit)
+
+    def list_recent_interactions(self, limit: int = 100) -> list[ChatInteraction]:
+        try:
+            return self.primary.list_recent_interactions(limit)
+        except Exception as exc:
+            logger.warning(
+                "Chat history %s recent interaction list failed; reading from %s: %s",
+                self.primary_name,
+                self.fallback_name,
+                exc,
+            )
+            return self.fallback.list_recent_interactions(limit)
+
+    def update_message_metadata_by_trace_id(self, trace_id: str, metadata: dict[str, Any]) -> bool:
+        try:
+            updated = self.primary.update_message_metadata_by_trace_id(trace_id, metadata)
+            if updated:
+                return True
+        except Exception as exc:
+            logger.warning(
+                "Chat history %s metadata update failed; updating %s: %s",
+                self.primary_name,
+                self.fallback_name,
+                exc,
+            )
+        return self.fallback.update_message_metadata_by_trace_id(trace_id, metadata)
+
+    def save_langfuse_trace_outbox(
+        self,
+        *,
+        trace_id: str,
+        user_id: str,
+        session_id: str,
+        output: dict[str, Any],
+        metadata: dict[str, Any],
+        error: str = "",
+    ) -> None:
+        self.fallback.save_langfuse_trace_outbox(
+            trace_id=trace_id,
+            user_id=user_id,
+            session_id=session_id,
+            output=output,
+            metadata=metadata,
+            error=error,
+        )
+
 
 def _json_dumps(value: dict[str, Any]) -> str:
     return json.dumps(value, default=str)
 
 
 def create_chat_history_repository(settings: AppSettings) -> ChatHistoryRepository:
-    if settings.chat_history_backend.lower() == "postgres":
+    backend = settings.chat_history_backend.lower().strip()
+    if backend == "postgres":
         return PostgresChatHistoryRepository(settings)
-    if settings.chat_history_backend.lower() == "dynamodb":
+    if backend == "dynamodb":
         return DynamoDBChatHistoryRepository(settings)
+    if backend in {"dynamodb_postgres", "dynamodb+postgres", "dynamodb-fallback-postgres"}:
+        return FallbackChatHistoryRepository(
+            primary=DynamoDBChatHistoryRepository(settings),
+            fallback=PostgresChatHistoryRepository(settings),
+            primary_name="dynamodb",
+            fallback_name="postgres",
+        )
     return InMemoryChatHistoryRepository()
 
 

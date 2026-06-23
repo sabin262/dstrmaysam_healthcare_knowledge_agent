@@ -7,6 +7,7 @@ from backend.app.deterministic_lookup import (
     LookupResult,
     _best_search_term,
     _is_staff_rota_query,
+    _name_search_terms,
     _requested_rota_dates,
     _requested_rota_role_groups,
     _terms,
@@ -75,6 +76,13 @@ class DeterministicLookupToolTests(unittest.TestCase):
         service = DeterministicLookupService(settings=None)
 
         self.assertEqual(service._classify("which ward is W07?"), "wards")
+
+    def test_patient_appointment_question_uses_appointment_lookup_and_patient_name(self):
+        service = DeterministicLookupService(settings=None)
+        query = "Does patient Leo Bennett have any appointments?"
+
+        self.assertEqual(service._classify(query), "appointments")
+        self.assertEqual(_name_search_terms(_terms(query)), ["leo", "bennett"])
 
     def test_manifest_csv_assets_are_selected_from_filename_and_columns(self):
         service = DeterministicLookupService(settings=None)

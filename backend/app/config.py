@@ -105,7 +105,7 @@ class AppSettings:
                 "DYNAMODB_CHAT_TABLE",
                 "dstrmaysam-healthcare-knowledge-agent-dev",
             ),
-            chat_history_backend=_env("CHAT_HISTORY_BACKEND", "memory"),
+            chat_history_backend=_env("CHAT_HISTORY_BACKEND", "dynamodb_postgres"),
             cors_origins=origins,
             prompt_label=_env("PROMPT_LABEL", "dev"),
             max_history_chars=int(_env("MAX_HISTORY_CHARS", "8000")),
@@ -208,4 +208,4 @@ class AppSettings:
         }
 
     def use_local_resources(self) -> bool:
-        return self.local_test_admin_enabled
+        return self.app_env.strip().lower() in {"local", "test"}
