@@ -13,12 +13,19 @@ This repository implements a containerized internal knowledge assistant MVP with
 - Langfuse tracing and prompt management
 - RAGAS golden-data evaluation with optional Langfuse score publishing
 - 100-query stress testing
-- AWS Secrets Manager for all secrets
+- AWS Secrets Manager in deployed environments, with a local secret-file fallback for development
 - ECR/ECS Fargate deployment templates
 
 ## Secret Model
 
-All secret values must be stored in AWS Secrets Manager. Do not put API keys, passwords, token signing secrets, or Langfuse credentials in source code, Docker images, `.env` files, or Streamlit secrets.
+Do not put API keys, passwords, token signing secrets, or Langfuse credentials in source code, Docker images, or Streamlit secrets.
+
+In `APP_ENV=local` or `APP_ENV=test`, the backend uses `LOCAL_APP_SECRET_FILE`
+for app auth/session secrets and reads Azure OpenAI/Langfuse credentials from
+environment variables. If `LOCAL_APP_SECRET_FILE` is missing, the backend creates
+one with a generated session secret and the configured local username/password.
+
+In non-local environments, secrets are loaded from AWS Secrets Manager.
 
 Expected secret JSON documents:
 
@@ -71,8 +78,6 @@ Inside the backend container, use `python -m app.auth hash-password`.
 
 ## Local Run
 
-Local execution still reads secrets from AWS Secrets Manager, so configure AWS credentials first.
-
 ```bash
 cp .env.example .env
 docker compose up --build
@@ -85,14 +90,34 @@ are loaded from `database/init/` on first container startup. If you need to
 re-run the init scripts from scratch, remove the `postgres_data` Docker volume
 and start Compose again.
 
-For local testing only, Docker Compose enables a fallback admin account when
+For local testing only, Docker Compose can inject a test admin account when
 `APP_ENV=local`:
 
 - Username: `admin`
 - Password: `admin123`
 
-Disable it by setting `LOCAL_TEST_ADMIN_ENABLED=false`. The fallback account is
-ignored unless `APP_ENV` is `local` or `test`.
+Disable the test-admin overlay by setting `LOCAL_TEST_ADMIN_ENABLED=false`. This
+does not disable the local secret file. The app still authenticates users from
+`LOCAL_APP_SECRET_FILE`, so update that file if you want different development
+users.
+
+## Chat History and Observability Fallbacks
+
+Set `CHAT_HISTORY_BACKEND=dynamodb_postgres` to use DynamoDB first and Postgres
+only if DynamoDB operations fail. This keeps production behavior aligned with
+DynamoDB while preserving chat history, previous-chat lists, and dashboard query
+analytics during local credential/network/table failures.
+
+Supported values:
+
+- `dynamodb_postgres`: DynamoDB primary, Postgres fallback
+- `dynamodb`: DynamoDB only
+- `postgres`: Postgres only
+- `memory`: process memory only, not durable
+
+If Langfuse trace updates fail, the backend writes the trace payload to the
+Postgres `langfuse_trace_outbox` table with `status='pending'` so it can be
+retried later. Chat message persistence is independent of Langfuse availability.
 
 ## Ingest Documents
 
@@ -130,6 +155,8 @@ Example deterministic lookup questions:
 - "What is the phone number for ICU outreach?"
 - "Which doctor is on call for Cardiology?"
 - "Show patient details for MRN10003."
+- "Does Leo Bennett have any appointments?"
+- "Show me a list of available doctors and nurses for today and tomorrow."
 - "Where is ward W05?"
 - "Is vancomycin restricted?"
 
@@ -158,7 +185,9 @@ The eval runner loads Langfuse credentials from AWS Secrets Manager using
 RAGAS contexts use `/chat` source snippets when available and fall back to source
 URIs.
 
-Run the 100-query stress test:
+Run the 100-query stress test. The default workload covers patient details,
+appointments, rota, formulary, catalogue, policy RAG, and safety-sensitive
+questions:
 
 ```bash
 python evals/stress_test.py --api-url http://localhost:8000 --token YOUR_TOKEN

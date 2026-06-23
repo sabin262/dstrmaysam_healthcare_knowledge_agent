@@ -129,6 +129,13 @@ class AdminDocumentUploadResponse(BaseModel):
     size_bytes: int
 
 
+class AdminDocumentMetadataUpdateRequest(BaseModel):
+    key: str = Field(min_length=1)
+    category: str = Field(min_length=1)
+    document_type: str = Field(min_length=1)
+    allowed_roles: list[str] = Field(min_length=1)
+
+
 class AdminIngestionResponse(BaseModel):
     opensearch_index: str | None = None
     previous_opensearch_index: str | None = None

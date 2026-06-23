@@ -22,6 +22,33 @@ CHAT_PROGRESS_MESSAGES = [
     "Checking structured lookup data and indexed documents if needed.",
     "Preparing a concise answer.",
 ]
+DASHBOARD_RANGE_OPTIONS = [
+    ("30mins", "30m"),
+    ("1hr", "1h"),
+    ("3hr", "3h"),
+    ("1 day", "1d"),
+    ("3 days", "3d"),
+    ("7 days", "7d"),
+    ("all time", "all"),
+]
+DOCUMENT_CATEGORY_OPTIONS = [
+    "general",
+    "clinical_policy",
+    "admin_policy",
+    "compliance",
+    "governance",
+    "operations",
+    "deterministic_lookup",
+]
+DOCUMENT_TYPE_OPTIONS = [
+    "document",
+    "policy",
+    "sop",
+    "pathway",
+    "guideline",
+    "procedure",
+    "csv_table",
+]
 
 
 def _set_auth_cookie(token: str, max_age_seconds: int) -> None:
@@ -31,7 +58,8 @@ def _set_auth_cookie(token: str, max_age_seconds: int) -> None:
         const cookieName = {json.dumps(AUTH_COOKIE_NAME)};
         const token = {json.dumps(token)};
         const maxAge = {int(max_age_seconds)};
-        document.cookie = cookieName + "=" + encodeURIComponent(token)
+        const targetDocument = window.parent && window.parent.document ? window.parent.document : document;
+        targetDocument.cookie = cookieName + "=" + encodeURIComponent(token)
             + "; Max-Age=" + maxAge + "; Path=/; SameSite=Lax";
         </script>
         """,
@@ -45,7 +73,8 @@ def _clear_auth_cookie(*, reload_parent: bool = False) -> None:
         f"""
         <script>
         const cookieName = {json.dumps(AUTH_COOKIE_NAME)};
-        document.cookie = cookieName + "=; Max-Age=0; Path=/; SameSite=Lax";
+        const targetDocument = window.parent && window.parent.document ? window.parent.document : document;
+        targetDocument.cookie = cookieName + "=; Max-Age=0; Path=/; SameSite=Lax";
         {reload_script}
         </script>
         """,
@@ -62,11 +91,9 @@ def _read_auth_cookie() -> str | None:
 
 
 def sync_auth_cookie() -> None:
-    token = st.session_state.get("access_token")
-    if not token:
-        return
-    max_age = int(st.session_state.get("access_token_expires_in") or AUTH_COOKIE_DEFAULT_MAX_AGE_SECONDS)
-    _set_auth_cookie(str(token), max_age)
+    # Keep authentication tied to the current Streamlit session. Browser cookie
+    # auto-restore made stale tokens look like fresh successful logins.
+    return
 
 
 def store_user_context(data: dict[str, Any]) -> None:
@@ -77,36 +104,29 @@ def store_user_context(data: dict[str, Any]) -> None:
 
 
 def restore_login_from_cookie() -> None:
-    if st.session_state.get("access_token"):
-        return
-    token = _read_auth_cookie()
-    if not token:
-        return
-    st.session_state.access_token = token
-    try:
-        data = get_json("/auth/me")
-        if isinstance(data, dict):
-            store_user_context(data)
-        st.session_state.setdefault("session_id", None)
-        st.session_state.setdefault("messages", [])
-        warm_document_manifest_cache()
-    except Exception:
-        for key in (
-            "access_token",
-            "access_token_expires_in",
-            "username",
-            "roles",
-            "departments",
-            "password_change_required",
-        ):
-            st.session_state.pop(key, None)
-        _clear_auth_cookie()
+    st.session_state.pop("logout_requested", None)
+    _clear_auth_cookie()
+    return
 
 
 def sign_out() -> None:
-    _clear_auth_cookie(reload_parent=True)
+    for key in (
+        "access_token",
+        "access_token_expires_in",
+        "username",
+        "roles",
+        "departments",
+        "password_change_required",
+        "session_id",
+        "messages",
+        "pending_chat_query",
+    ):
+        st.session_state.pop(key, None)
+    st.session_state.logout_requested = True
     st.session_state.clear()
-    st.stop()
+    st.session_state.logout_requested = True
+    _clear_auth_cookie()
+    st.rerun()
 
 
 def api_headers() -> dict[str, str]:
@@ -200,6 +220,40 @@ def safe_article_url(article: dict[str, Any]) -> str:
 
 def render_page_title(title: str) -> None:
     st.markdown(f'<div class="hka-page-title">{html.escape(title)}</div>', unsafe_allow_html=True)
+
+
+def inject_chat_layout_css() -> None:
+    st.markdown(
+        """
+        <style>
+        .hka-chat-page-marker {
+            display: none;
+        }
+        section[data-testid="stMain"] div[data-testid="stMainBlockContainer"]:has(.hka-chat-page-marker),
+        div[data-testid="stAppViewContainer"] .main .block-container:has(.hka-chat-page-marker) {
+            min-height: calc(100dvh - 3rem);
+            padding-bottom: 5.25rem !important;
+        }
+        div[data-testid="stMainBlockContainer"]:has(.hka-chat-page-marker) .hka-page-title,
+        div[data-testid="stAppViewContainer"] .main .block-container:has(.hka-chat-page-marker) .hka-page-title {
+            margin-bottom: 0.45rem !important;
+        }
+        div[data-testid="stVerticalBlockBorderWrapper"]:has(.hka-chat-window-marker) {
+            height: max(360px, calc(100dvh - 11.25rem)) !important;
+            max-height: none !important;
+        }
+        div[data-testid="stVerticalBlockBorderWrapper"]:has(.hka-chat-window-marker) > div,
+        div[data-testid="stVerticalBlockBorderWrapper"]:has(.hka-chat-window-marker) div[data-testid="stVerticalBlock"] {
+            height: 100% !important;
+            max-height: none !important;
+        }
+        div[data-testid="stVerticalBlockBorderWrapper"]:has(.hka-chat-window-marker) div[data-testid="stVerticalBlock"] {
+            overflow-y: auto;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def inject_app_theme() -> None:
@@ -341,6 +395,30 @@ def inject_app_theme() -> None:
             color: var(--hka-muted);
             font-size: 0.9rem;
             line-height: 1.45;
+        }
+        div[data-testid="stVerticalBlockBorderWrapper"]:has(.hka-chat-window-marker) {
+            height: calc(100dvh - 11.25rem) !important;
+            min-height: 390px !important;
+            max-height: calc(100dvh - 11.25rem) !important;
+            margin-bottom: 0.65rem !important;
+        }
+        div[data-testid="stVerticalBlockBorderWrapper"]:has(.hka-chat-window-marker),
+        div[data-testid="stVerticalBlockBorderWrapper"]:has(.hka-chat-window-marker) > div,
+        div[data-testid="stVerticalBlockBorderWrapper"]:has(.hka-chat-window-marker) div[data-testid="stVerticalBlock"] {
+            height: 100% !important;
+            overflow-y: auto !important;
+        }
+        div[data-testid="stVerticalBlockBorderWrapper"]:has(.hka-chat-window-marker) div[data-testid="stVerticalBlock"] {
+            padding-bottom: 0.75rem !important;
+        }
+        div[data-testid="stVerticalBlock"]:has(.hka-chat-window-marker) {
+            gap: 0.55rem !important;
+        }
+        div[data-testid="stChatInput"] {
+            margin-top: 0 !important;
+        }
+        div[data-testid="stChatInput"] > div {
+            padding-top: 0.35rem !important;
         }
         </style>
         """,
@@ -723,8 +801,45 @@ def tool_latency_rows(tool_timings: list[Any]) -> list[dict[str, Any]]:
 
 def render_admin_dashboard() -> None:
     render_page_title("Dashboard")
+
+    user_options = ["all"]
     try:
-        payload = get_json("/admin/dashboard?limit=200")
+        users_payload = get_json("/admin/users")
+        if isinstance(users_payload, list):
+            user_options.extend(
+                str(user.get("username"))
+                for user in users_payload
+                if isinstance(user, dict) and user.get("username")
+            )
+    except Exception:
+        pass
+    user_options = list(dict.fromkeys(user_options))
+
+    filter_columns = st.columns([1, 1, 2])
+    range_labels = [label for label, _ in DASHBOARD_RANGE_OPTIONS]
+    selected_range_label = filter_columns[0].selectbox(
+        "Range",
+        range_labels,
+        index=range_labels.index("all time"),
+        key="dashboard_range_filter",
+    )
+    selected_range = dict(DASHBOARD_RANGE_OPTIONS)[selected_range_label]
+    selected_user_label = filter_columns[1].selectbox(
+        "User",
+        ["All users", *[username for username in user_options if username != "all"]],
+        key="dashboard_user_filter",
+    )
+    selected_user = "all" if selected_user_label == "All users" else selected_user_label
+
+    try:
+        payload = get_json(
+            "/admin/dashboard",
+            params={
+                "limit": 500,
+                "range": selected_range,
+                "user_id": selected_user,
+            },
+        )
     except Exception as exc:
         st.error(f"Unable to load dashboard: {exc}")
         return
@@ -1006,18 +1121,108 @@ def document_table_rows(documents: list[dict[str, Any]]) -> list[dict[str, Any]]
     for document in documents:
         metadata = document.get("metadata") or {}
         key = document.get("key") or str(document.get("uri", "")).split("/", 3)[-1]
+        roles = metadata.get("allowed_roles") or []
+        if isinstance(roles, str):
+            roles = [roles]
         rows.append(
             {
                 "File": document.get("title") or str(key).rsplit("/", 1)[-1],
-                "Key": key,
                 "Chunks": document.get("chunk_count", 0),
                 "Category": metadata.get("domain", "general"),
                 "Type": metadata.get("document_type", "document"),
+                "Access roles": ", ".join(str(role) for role in roles),
                 "Status": document.get("ingestion_status") or "indexed",
                 "URI": document.get("uri", ""),
             }
         )
     return rows
+
+
+def _metadata_options(options: list[str], current_value: str) -> list[str]:
+    value = (current_value or "").strip()
+    if value and value not in options:
+        return [value, *options]
+    return list(options)
+
+
+def _option_index(options: list[str], current_value: str, default: str) -> int:
+    value = current_value if current_value in options else default
+    try:
+        return options.index(value)
+    except ValueError:
+        return 0
+
+
+def _update_cached_document(updated_document: dict[str, Any]) -> None:
+    updated_key = updated_document.get("key")
+    documents = []
+    replaced = False
+    for document in st.session_state.get("document_cache", []):
+        if document.get("key") == updated_key:
+            documents.append(updated_document)
+            replaced = True
+        else:
+            documents.append(document)
+    if not replaced:
+        documents.append(updated_document)
+    st.session_state.document_cache = documents
+    st.session_state.document_cache_loaded = True
+    st.session_state.document_cache_error = None
+
+
+def render_document_metadata_editor(documents: list[dict[str, Any]]) -> None:
+    st.subheader("Document metadata")
+    for index, document in enumerate(documents):
+        metadata = document.get("metadata") or {}
+        title = document.get("title") or document.get("key") or document.get("uri") or "Untitled"
+        current_category = str(metadata.get("domain") or "general")
+        current_type = str(metadata.get("document_type") or "document")
+        raw_roles = metadata.get("allowed_roles", [])
+        if isinstance(raw_roles, str):
+            raw_roles = [raw_roles]
+        current_roles = [role for role in raw_roles if role in KNOWN_ROLES]
+        category_options = _metadata_options(DOCUMENT_CATEGORY_OPTIONS, current_category)
+        type_options = _metadata_options(DOCUMENT_TYPE_OPTIONS, current_type)
+        with st.expander(str(title)):
+            st.caption(document.get("uri", ""))
+            with st.form(f"document-metadata-{index}"):
+                category = st.selectbox(
+                    "Category",
+                    category_options,
+                    index=_option_index(category_options, current_category, "general"),
+                )
+                document_type = st.selectbox(
+                    "Document type",
+                    type_options,
+                    index=_option_index(type_options, current_type, "document"),
+                )
+                allowed_roles = st.multiselect(
+                    "Access roles",
+                    KNOWN_ROLES,
+                    default=current_roles or ["staff"],
+                )
+                submitted = st.form_submit_button("Save metadata")
+            if submitted:
+                if not allowed_roles:
+                    st.error("Select at least one access role")
+                    continue
+                try:
+                    updated = patch_json(
+                        "/admin/documents/metadata",
+                        {
+                            "key": document.get("key") or document.get("uri") or title,
+                            "category": category,
+                            "document_type": document_type,
+                            "allowed_roles": allowed_roles,
+                        },
+                    )
+                    _update_cached_document(updated)
+                    st.session_state.document_metadata_notice = (
+                        "Document metadata updated. Run ingestion to apply metadata changes to indexed search chunks."
+                    )
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Metadata update failed: {exc}")
 
 
 def render_documents_table(documents: list[dict[str, Any]]) -> None:
@@ -1034,6 +1239,7 @@ def render_documents_table(documents: list[dict[str, Any]]) -> None:
         len({str(row.get("Category") or "general") for row in rows}),
     )
     st.dataframe(rows, hide_index=True, use_container_width=True)
+    render_document_metadata_editor(documents)
 
 
 def render_admin_documents() -> None:
@@ -1044,6 +1250,9 @@ def render_admin_documents() -> None:
         current_documents = list(st.session_state.get("document_cache", []))
     if st.session_state.get("document_cache_error"):
         st.error(f"Unable to load indexed documents: {st.session_state.document_cache_error}")
+    document_metadata_notice = st.session_state.pop("document_metadata_notice", None)
+    if document_metadata_notice:
+        st.success(document_metadata_notice)
 
     uploaded_files = st.file_uploader(
         "Upload documents to S3",
@@ -1181,6 +1390,7 @@ def render_chat_progress(
         with st.chat_message("assistant"):
             with st.status(label, expanded=True, state=state):
                 st.write(message)
+    scroll_chat_to_latest()
 
 
 def submit_chat_query_with_progress(query: str, progress_placeholder: Any) -> None:
@@ -1217,6 +1427,7 @@ def submit_chat_query_with_progress(query: str, progress_placeholder: Any) -> No
 
 
 def render_chat_messages() -> Any:
+    st.markdown('<span class="hka-chat-window-marker"></span>', unsafe_allow_html=True)
     messages = st.session_state.get("messages", [])
     if not messages:
         st.info("Ask a question about healthcare knowledge.")
@@ -1224,39 +1435,101 @@ def render_chat_messages() -> Any:
         role = "assistant" if message.get("role") == "assistant" else "user"
         with st.chat_message(role):
             st.markdown(message.get("content", ""))
-    return st.empty()
+    progress_placeholder = st.empty()
+    st.markdown('<span class="hka-chat-bottom-anchor"></span>', unsafe_allow_html=True)
+    return progress_placeholder
+
+
+def scroll_chat_to_latest() -> None:
+    components.html(
+        """
+        <script>
+        const scrollLatestChat = () => {
+            const doc = window.parent.document;
+            const anchors = Array.from(doc.querySelectorAll(".hka-chat-bottom-anchor"));
+            const anchor = anchors[anchors.length - 1];
+            const markers = Array.from(doc.querySelectorAll(".hka-chat-window-marker"));
+            const marker = markers[markers.length - 1];
+            if (!marker) return;
+            const wrapper = marker.closest('div[data-testid="stVerticalBlockBorderWrapper"]');
+            if (!wrapper) return;
+
+            const candidates = [
+                wrapper,
+                wrapper.parentElement,
+                ...Array.from(wrapper.querySelectorAll("div")),
+                ...Array.from(wrapper.parentElement ? wrapper.parentElement.querySelectorAll("div") : []),
+            ].filter(Boolean);
+            const scrollables = candidates.filter((element) => {
+                const style = window.parent.getComputedStyle(element);
+                return element.scrollHeight > element.clientHeight + 4
+                    && style.display !== "none"
+                    && style.visibility !== "hidden";
+            });
+            for (const element of scrollables) {
+                element.scrollTop = element.scrollHeight;
+            }
+            const target = anchor || wrapper.querySelector('[data-testid="stChatMessage"]:last-of-type') || marker;
+            target.scrollIntoView({ block: "end", inline: "nearest" });
+        };
+
+        const installChatAutoScroll = () => {
+            const doc = window.parent.document;
+            const marker = Array.from(doc.querySelectorAll(".hka-chat-window-marker")).pop();
+            if (!marker) return;
+            const wrapper = marker.closest('div[data-testid="stVerticalBlockBorderWrapper"]');
+            if (!wrapper) return;
+
+            if (window.parent.__hkaChatScrollObserver) {
+                window.parent.__hkaChatScrollObserver.disconnect();
+            }
+            window.parent.__hkaChatScrollObserver = new MutationObserver(() => scrollLatestChat());
+            window.parent.__hkaChatScrollObserver.observe(wrapper, {
+                childList: true,
+                subtree: true,
+                characterData: true,
+            });
+            setTimeout(() => {
+                if (window.parent.__hkaChatScrollObserver) {
+                    window.parent.__hkaChatScrollObserver.disconnect();
+                    window.parent.__hkaChatScrollObserver = null;
+                }
+            }, 15000);
+        };
+
+        [0, 25, 75, 150, 350, 750, 1500, 2500].forEach((delay) => setTimeout(scrollLatestChat, delay));
+        setTimeout(installChatAutoScroll, 25);
+        </script>
+        """,
+        height=0,
+    )
 
 
 def render_chat_page() -> None:
+    inject_chat_layout_css()
+    st.markdown('<span class="hka-chat-page-marker"></span>', unsafe_allow_html=True)
     render_page_title("Chat")
+    pending_query = st.session_state.pop("pending_chat_query", None)
     with st.container(height=620, border=True):
-        chat_content = st.empty()
-        with chat_content.container():
-            render_chat_messages()
-
-    with st.form("chat-query-form", clear_on_submit=True):
-        input_columns = st.columns([8, 1])
-        query = input_columns[0].text_input(
-            "Message",
-            placeholder="Ask a question about healthcare knowledge",
-            label_visibility="collapsed",
-        )
-        submitted = input_columns[1].form_submit_button("Send", use_container_width=True)
-
-    if submitted:
-        cleaned_query = query.strip()
-        if not cleaned_query:
-            return
-        st.session_state.setdefault("messages", []).append({"role": "user", "content": cleaned_query})
-        with chat_content.container():
-            render_chat_messages()
-            progress_placeholder = st.empty()
+        if pending_query:
+            st.session_state.setdefault("messages", []).append({"role": "user", "content": pending_query})
+        progress_placeholder = render_chat_messages()
+        if pending_query:
+            scroll_chat_to_latest()
             try:
-                submit_chat_query_with_progress(cleaned_query, progress_placeholder)
+                submit_chat_query_with_progress(pending_query, progress_placeholder)
             except Exception as exc:
                 st.error(f"Chat failed: {exc}")
+                scroll_chat_to_latest()
                 return
+            scroll_chat_to_latest()
+            st.rerun()
+    query = st.chat_input("Ask a question about healthcare knowledge")
+    if query and query.strip():
+        st.session_state.pending_chat_query = query.strip()
+        scroll_chat_to_latest()
         st.rerun()
+    scroll_chat_to_latest()
 
 
 def render_login_page() -> None:
