@@ -85,6 +85,20 @@ ROW_VALUE_QUERY_MARKERS = {
     "wheelchairs",
 }
 
+ROW_VALUE_GENERIC_QUERY_MARKERS = {
+    "asset",
+    "assets",
+    "available",
+    "availability",
+    "device",
+    "devices",
+    "equipment",
+    "inventory",
+    "machine",
+    "machines",
+    "stock",
+}
+
 QUERY_INTENT_MARKERS = {
     "appointment",
     "appointments",
@@ -307,6 +321,12 @@ def _has_row_value_intent(query: str) -> bool:
     return bool(set(_terms(query)) & ROW_VALUE_QUERY_MARKERS)
 
 
+def _row_value_lookup_stopwords(query: str, base_stopwords: set[str] | None = None) -> set[str]:
+    base = set(base_stopwords or set())
+    candidate_stopwords = base | ROW_VALUE_GENERIC_QUERY_MARKERS
+    return candidate_stopwords if _expanded_search_terms(query, candidate_stopwords) else base
+
+
 def _expanded_search_terms(query: str, stopwords: set[str] | None = None) -> list[str]:
     active_stopwords = STOPWORDS | AGGREGATE_QUERY_MARKERS | (stopwords or set())
     expanded: list[str] = []
@@ -505,6 +525,11 @@ class DeterministicLookupService:
         selected_assets = self._matching_csv_assets(query, csv_assets or [])
         selected_filenames = [str(asset.get("filename") or "") for asset in selected_assets if asset.get("filename")]
         aggregate_intent = "count" if _has_count_intent(query) else ""
+        row_value_count_stopwords = (
+            _row_value_lookup_stopwords(query, lookup_stopwords)
+            if aggregate_intent == "count" and _has_row_value_intent(query)
+            else lookup_stopwords
+        )
         aggregate_result: dict[str, Any] | None = None
         resolved_today = _resolved_today()
         requested_rota_dates: list[str] = []
@@ -557,14 +582,14 @@ class DeterministicLookupService:
                     scopes,
                     limit,
                     source_filenames=selected_filenames,
-                    stopwords=lookup_stopwords,
+                    stopwords=row_value_count_stopwords,
                 )
                 if aggregate_intent == "count":
                     counts_by_source = self._count_uploaded_lookup_rows(
                         query,
                         scopes,
                         source_filenames=selected_filenames,
-                        stopwords=lookup_stopwords,
+                        stopwords=row_value_count_stopwords,
                     )
                     aggregate_result = {
                         "type": "count",
@@ -595,7 +620,7 @@ class DeterministicLookupService:
                         query,
                         scopes,
                         limit,
-                        stopwords=lookup_stopwords,
+                        stopwords=row_value_count_stopwords,
                     )
                     rows = uploaded_rows
                 if not rows:
@@ -604,7 +629,7 @@ class DeterministicLookupService:
                         query,
                         scopes,
                         max(0, limit - len(rows)),
-                        stopwords=lookup_stopwords,
+                        stopwords=row_value_count_stopwords,
                     )
                     row_value_search_used = True
                     rows = rows + uploaded_rows
@@ -616,7 +641,7 @@ class DeterministicLookupService:
                         query,
                         scopes,
                         source_filenames=None,
-                        stopwords=lookup_stopwords,
+                        stopwords=row_value_count_stopwords,
                     )
                     aggregate_result = {
                         "type": "count",
@@ -624,7 +649,7 @@ class DeterministicLookupService:
                         "counts_by_source": counts_by_source,
                         "source_filenames": sorted(counts_by_source),
                     }
-            row_search_terms = _expanded_search_terms(query, lookup_stopwords)
+            row_search_terms = _expanded_search_terms(query, row_value_count_stopwords)
             matched_terms = _matched_terms(row_search_terms, rows)
             matched_columns = _matched_columns(row_search_terms, rows)
         except Exception as exc:

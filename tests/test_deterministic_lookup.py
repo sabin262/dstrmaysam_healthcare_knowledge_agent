@@ -145,9 +145,17 @@ class FakeEquipmentCountLookup(DeterministicLookupService):
         super().__init__(FakeSettings())
         self.category_calls = []
         self.row_search_calls = []
+        self.count_calls = []
 
     def _query_uploaded_lookup_rows(self, query, scopes, limit, *, source_filenames=None, stopwords=None):
-        self.row_search_calls.append({"query": query, "limit": limit, "source_filenames": source_filenames})
+        self.row_search_calls.append(
+            {
+                "query": query,
+                "limit": limit,
+                "source_filenames": source_filenames,
+                "stopwords": set(stopwords or set()),
+            }
+        )
         return [
             {
                 "source_table": "uploaded_lookup_rows",
@@ -166,6 +174,13 @@ class FakeEquipmentCountLookup(DeterministicLookupService):
         ]
 
     def _count_uploaded_lookup_rows(self, query, scopes, *, source_filenames=None, stopwords=None):
+        self.count_calls.append(
+            {
+                "query": query,
+                "source_filenames": source_filenames,
+                "stopwords": set(stopwords or set()),
+            }
+        )
         return {"equipment_assets.csv": 2}
 
     def _lookup_category(self, category, query, scopes, limit, *, stopwords=None):
@@ -368,6 +383,11 @@ class DeterministicLookupToolTests(unittest.TestCase):
         self.assertEqual(len(result.rows), 2)
         self.assertEqual(service.category_calls, [])
         self.assertEqual(service.row_search_calls[0]["limit"], 100)
+        self.assertIn("machine", service.row_search_calls[0]["stopwords"])
+        self.assertIn("machines", service.row_search_calls[0]["stopwords"])
+        self.assertNotIn("ecg", service.row_search_calls[0]["stopwords"])
+        self.assertIn("machine", service.count_calls[0]["stopwords"])
+        self.assertNotIn("ecg", service.count_calls[0]["stopwords"])
         self.assertEqual(result.lookup_plan["aggregate_intent"], "count")
         self.assertEqual(result.lookup_plan["aggregate_result"]["matching_rows"], 2)
         self.assertTrue(result.lookup_plan["row_value_search_used"])
