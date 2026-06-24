@@ -21,6 +21,42 @@ def _terms(query: str) -> list[str]:
     return [term.lower() for term in query.split() if len(term) >= 3]
 
 
+def _lookup_limit(query: str) -> int:
+    lowered = query.lower()
+    if any(
+        marker in lowered
+        for marker in [
+            "list all",
+            "show all",
+            "all medicine",
+            "all medicines",
+            "all drug",
+            "all drugs",
+            "how many equipment",
+            "how many assets",
+            "how many asset",
+            "how many devices",
+            "how many device",
+            "how many machines",
+            "how many machine",
+            "how many ecg",
+            "how many ventilator",
+            "how many ventilators",
+            "all equipment",
+            "equipment type",
+            "equipment types",
+            "all asset",
+            "asset type",
+            "asset types",
+            "all device",
+            "device type",
+            "device types",
+        ]
+    ):
+        return 100
+    return 10
+
+
 def _record_matches(record: DocumentRecord, query: str, domains: set[str] | None = None) -> bool:
     terms = _terms(query)
     metadata = record.metadata
@@ -87,6 +123,7 @@ def _deterministic_tool_description(csv_assets: list[dict[str, Any]]) -> str:
         "department directory data, appointments, wards, formulary facts, staff rota availability, "
         "and uploaded CSV lookup rows including all csv. files "
         "Use this when the user asks for exact structured values, multiple known values to look up, "
+        "counts/totals, inventory or equipment availability, short entity facts such as medicine names, "
         "or table-like data that can answer the question without document interpretation."
     )
     if not csv_assets:
@@ -206,7 +243,12 @@ def build_healthcare_agent_tools(
                 },
                 indent=2,
             )
-        return deterministic_lookup.lookup(query, user, csv_assets=deterministic_csv_assets).to_json()
+        return deterministic_lookup.lookup(
+            query,
+            user,
+            limit=_lookup_limit(query),
+            csv_assets=deterministic_csv_assets,
+        ).to_json()
 
     return [
         AgentTool(

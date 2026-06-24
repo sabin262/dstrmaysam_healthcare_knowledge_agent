@@ -31,7 +31,7 @@ class FakeDocuments:
 
 
 class FakeDeterministicLookup:
-    def lookup(self, query, user, csv_assets=None):
+    def lookup(self, query, user, limit=10, csv_assets=None):
         return LookupResult(
             category="doctors",
             rows=[
@@ -102,6 +102,90 @@ class FakeRowValueFallbackLookup(DeterministicLookupService):
 
     def _count_uploaded_lookup_rows(self, query, scopes, *, source_filenames=None, stopwords=None):
         return {"equipment_assets.csv": 1}
+
+
+class FakeDistinctEquipmentTypeLookup(DeterministicLookupService):
+    def __init__(self):
+        super().__init__(FakeSettings())
+        self.distinct_calls = []
+        self.category_calls = []
+
+    def _query_uploaded_distinct_field_values(self, scopes, field_candidates, *, source_filenames=None, limit=100):
+        self.distinct_calls.append(
+            {
+                "field_candidates": list(field_candidates),
+                "source_filenames": list(source_filenames or []),
+                "limit": limit,
+            }
+        )
+        return [
+            {
+                "source_table": "uploaded_lookup_rows",
+                "source_filename": "equipment_assets.csv",
+                "row_number": 1,
+                "row": {"equipment_type": "Ventilator"},
+                "access_level": "all_staff",
+            },
+            {
+                "source_table": "uploaded_lookup_rows",
+                "source_filename": "equipment_assets.csv",
+                "row_number": 2,
+                "row": {"equipment_type": "Infusion Pump"},
+                "access_level": "all_staff",
+            },
+        ]
+
+    def _lookup_category(self, category, query, scopes, limit, *, stopwords=None):
+        self.category_calls.append({"category": category, "limit": limit})
+        return [{"source_table": "directory", "name": "Cardiology Equipment fault Desk"}]
+
+
+class FakeEquipmentCountLookup(DeterministicLookupService):
+    def __init__(self):
+        super().__init__(FakeSettings())
+        self.category_calls = []
+        self.row_search_calls = []
+        self.count_calls = []
+
+    def _query_uploaded_lookup_rows(self, query, scopes, limit, *, source_filenames=None, stopwords=None):
+        self.row_search_calls.append(
+            {
+                "query": query,
+                "limit": limit,
+                "source_filenames": source_filenames,
+                "stopwords": set(stopwords or set()),
+            }
+        )
+        return [
+            {
+                "source_table": "uploaded_lookup_rows",
+                "source_filename": "equipment_assets.csv",
+                "row_number": 1,
+                "row": {"equipment_type": "ECG Machine", "location": "Cardiology Ward", "status": "Available"},
+                "access_level": "all_staff",
+            },
+            {
+                "source_table": "uploaded_lookup_rows",
+                "source_filename": "equipment_assets.csv",
+                "row_number": 2,
+                "row": {"equipment_type": "ECG Machine", "location": "Emergency Department", "status": "In use"},
+                "access_level": "all_staff",
+            },
+        ]
+
+    def _count_uploaded_lookup_rows(self, query, scopes, *, source_filenames=None, stopwords=None):
+        self.count_calls.append(
+            {
+                "query": query,
+                "source_filenames": source_filenames,
+                "stopwords": set(stopwords or set()),
+            }
+        )
+        return {"equipment_assets.csv": 2}
+
+    def _lookup_category(self, category, query, scopes, limit, *, stopwords=None):
+        self.category_calls.append({"category": category, "limit": limit})
+        return [{"source_table": "directory", "name": "Cardiology Equipment fault Desk"}]
 
 
 class FakeNoRotaRowsLookup(DeterministicLookupService):
@@ -259,6 +343,55 @@ class DeterministicLookupToolTests(unittest.TestCase):
         self.assertEqual(result.lookup_plan["aggregate_result"]["counts_by_source"], {"equipment_assets.csv": 1})
         self.assertIn("transport", result.lookup_plan["matched_terms"])
         self.assertIn("equipment_type", result.lookup_plan["matched_columns"])
+
+    def test_equipment_type_list_uses_distinct_uploaded_rows_without_directory_fallback(self):
+        service = FakeDistinctEquipmentTypeLookup()
+
+        result = service.lookup(
+            "list all equipment we have",
+            HealthcareUserContext(user_id="admin", roles=("admin",)),
+            limit=100,
+            csv_assets=[
+                {
+                    "filename": "equipment_assets.csv",
+                    "columns": ["asset_id", "equipment_type", "location", "status"],
+                    "semantic_terms": ["asset", "equipment", "ventilator"],
+                    "categorical_values": {"equipment_type": ["Ventilator", "Infusion Pump"]},
+                    "row_count": 30,
+                }
+            ],
+        )
+
+        self.assertEqual([row["row"]["equipment_type"] for row in result.rows], ["Ventilator", "Infusion Pump"])
+        self.assertEqual(service.category_calls, [])
+        self.assertEqual(service.distinct_calls[0]["source_filenames"], ["equipment_assets.csv"])
+        self.assertEqual(service.distinct_calls[0]["limit"], 100)
+        self.assertTrue(result.lookup_plan["row_value_search_used"])
+        self.assertEqual(result.lookup_plan["distinct_field"], "equipment_type")
+        self.assertEqual(result.lookup_plan["matched_csv_sources"], ["equipment_assets.csv"])
+
+    def test_equipment_count_uses_uploaded_rows_before_directory_fallback(self):
+        service = FakeEquipmentCountLookup()
+
+        result = service.lookup(
+            "how many ecg machine do we have",
+            HealthcareUserContext(user_id="admin", roles=("admin",)),
+            limit=100,
+            csv_assets=[],
+        )
+
+        self.assertEqual(len(result.rows), 2)
+        self.assertEqual(service.category_calls, [])
+        self.assertEqual(service.row_search_calls[0]["limit"], 100)
+        self.assertIn("machine", service.row_search_calls[0]["stopwords"])
+        self.assertIn("machines", service.row_search_calls[0]["stopwords"])
+        self.assertNotIn("ecg", service.row_search_calls[0]["stopwords"])
+        self.assertIn("machine", service.count_calls[0]["stopwords"])
+        self.assertNotIn("ecg", service.count_calls[0]["stopwords"])
+        self.assertEqual(result.lookup_plan["aggregate_intent"], "count")
+        self.assertEqual(result.lookup_plan["aggregate_result"]["matching_rows"], 2)
+        self.assertTrue(result.lookup_plan["row_value_search_used"])
+        self.assertEqual(result.lookup_plan["matched_csv_sources"], ["equipment_assets.csv"])
 
     def test_domain_and_schema_words_remain_search_terms(self):
         service = DeterministicLookupService(settings=None)

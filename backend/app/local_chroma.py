@@ -128,6 +128,7 @@ class LocalChromaIngestionJob(LocalChromaEmbeddingMixin, LocalChromaCollectionMi
             if existing_document and existing_document.get("checksum") == checksum and not force_reindex:
                 skipped_documents += 1
                 unchanged = dict(existing_document)
+                unchanged.setdefault("uri", _local_uri(key))
                 unchanged["ingestion_status"] = "skipped_unchanged"
                 manifest_documents.append(unchanged)
                 continue
@@ -148,6 +149,7 @@ class LocalChromaIngestionJob(LocalChromaEmbeddingMixin, LocalChromaCollectionMi
                 {
                     "key": document.key,
                     "title": document.title,
+                    "uri": _local_uri(document.key),
                     "content_type": document.content_type,
                     "checksum": document.checksum,
                     "metadata": document.metadata,

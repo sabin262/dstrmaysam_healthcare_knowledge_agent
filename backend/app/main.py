@@ -865,10 +865,15 @@ def delete_admin_document_indexes(
     try:
         retrieval_service = get_retrieval_service()
         deleted_chunks = 0
+        deleted_lookup_rows = 0
         if hasattr(retrieval_service, "delete_all_indexes"):
             deleted_chunks = int(retrieval_service.delete_all_indexes())
         elif hasattr(retrieval_service, "invalidate_cache"):
             retrieval_service.invalidate_cache()
+
+        deterministic_lookup = get_deterministic_lookup_service()
+        if hasattr(deterministic_lookup, "delete_uploaded_lookup_rows"):
+            deleted_lookup_rows = int(deterministic_lookup.delete_uploaded_lookup_rows())
 
         document_store = get_document_store()
         if hasattr(document_store, "replace_manifest"):
@@ -884,10 +889,11 @@ def delete_admin_document_indexes(
 
     return AdminDeleteIndexesResponse(
         deleted_chunks=deleted_chunks,
+        deleted_lookup_rows=deleted_lookup_rows,
         manifest_cleared=True,
         backend="chroma" if get_settings().use_local_resources() else "opensearch",
         raw_documents_preserved=True,
-        deterministic_lookup_preserved=True,
+        deterministic_lookup_preserved=False,
     )
 
 

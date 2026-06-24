@@ -144,6 +144,53 @@ DETERMINISTIC_QUERY_MARKERS = {
     "today",
     "tomorrow",
 }
+STRUCTURED_AGGREGATE_MARKERS = {
+    "how many",
+    "how much",
+    "number of",
+    "count",
+    "counts",
+    "total",
+    "quantity",
+}
+STRUCTURED_ROW_VALUE_MARKERS = {
+    "asset",
+    "assets",
+    "available",
+    "availability",
+    "device",
+    "devices",
+    "ecg",
+    "equipment",
+    "equipments",
+    "inventory",
+    "machine",
+    "machines",
+    "monitor",
+    "monitors",
+    "oxygen",
+    "pump",
+    "pumps",
+    "stock",
+    "ventilator",
+    "ventilators",
+    "wheelchair",
+    "wheelchairs",
+}
+ENTITY_LOOKUP_MARKERS = {
+    "about",
+    "detail",
+    "details",
+    "info",
+    "information",
+}
+LIST_LOOKUP_MARKERS = {
+    "all",
+    "available",
+    "every",
+    "list",
+    "show",
+}
 MULTIPART_QUERY_PATTERN = re.compile(
     r"\b(?:and also|also|as well as|plus)\b|[?]\s+(?=\w)",
     flags=re.IGNORECASE,
@@ -401,7 +448,303 @@ def _has_policy_intent(text: str) -> bool:
 
 
 def _has_deterministic_intent(text: str) -> bool:
-    return _contains_marker(text, DETERMINISTIC_QUERY_MARKERS)
+    return _contains_marker(text, DETERMINISTIC_QUERY_MARKERS) or _has_structured_row_value_intent(text)
+
+
+def _has_structured_row_value_intent(text: str) -> bool:
+    lowered = text.lower()
+    has_aggregate = any(marker in lowered for marker in STRUCTURED_AGGREGATE_MARKERS)
+    has_row_value_marker = _contains_marker(lowered, STRUCTURED_ROW_VALUE_MARKERS)
+    return has_aggregate and has_row_value_marker
+
+
+def _has_short_entity_lookup_intent(text: str) -> bool:
+    lowered = text.lower()
+    if _has_policy_intent(text):
+        return False
+    if not any(marker in lowered for marker in ENTITY_LOOKUP_MARKERS):
+        return False
+    useful_terms = [
+        term
+        for term in re.findall(r"[A-Za-z0-9@._+-]+", lowered)
+        if len(term) >= 3 and term not in ENTITY_LOOKUP_MARKERS and term not in {"tell", "show", "give", "need"}
+    ]
+    return 1 <= len(useful_terms) <= 3
+
+
+def _has_list_lookup_intent(text: str) -> bool:
+    lowered = text.lower()
+    if _has_policy_intent(text):
+        return False
+    terms = set(re.findall(r"[A-Za-z0-9@._+-]+", lowered))
+    if not (terms & LIST_LOOKUP_MARKERS):
+        return False
+    return _contains_marker(lowered, DETERMINISTIC_QUERY_MARKERS | STRUCTURED_ROW_VALUE_MARKERS)
+
+
+def _deterministic_tool_output_has_results(output: str) -> bool:
+    try:
+        payload = json.loads(output)
+    except Exception:
+        return False
+    if not isinstance(payload, dict):
+        return False
+    rows = payload.get("rows")
+    if isinstance(rows, list) and rows:
+        return True
+    lookup_plan = payload.get("lookup_plan")
+    aggregate_result = lookup_plan.get("aggregate_result") if isinstance(lookup_plan, dict) else None
+    if isinstance(aggregate_result, dict):
+        try:
+            return int(aggregate_result.get("matching_rows") or 0) > 0
+        except Exception:
+            return False
+    return False
+
+
+DETERMINISTIC_DETAIL_LABELS = {
+    "access_level": "Access level",
+    "approval_required": "Approval required",
+    "category": "Category",
+    "max_adult_dose": "Maximum adult dose",
+    "monitoring_required": "Monitoring required",
+    "restricted": "Restricted",
+}
+DETERMINISTIC_DETAIL_ORDER = (
+    "category",
+    "restricted",
+    "approval_required",
+    "max_adult_dose",
+    "monitoring_required",
+    "access_level",
+)
+DETERMINISTIC_NAME_FIELDS = (
+    "medicine_name",
+    "medicine",
+    "drug_name",
+    "drug",
+    "name",
+    "full_name",
+    "asset_name",
+    "equipment_name",
+    "equipment_type",
+    "device_name",
+    "title",
+)
+DETERMINISTIC_LIST_NAME_FIELDS = (
+    "medicine_name",
+    "medicine",
+    "drug_name",
+    "drug",
+    "name",
+    "full_name",
+    "asset_name",
+    "equipment_name",
+    "equipment_type",
+    "device_name",
+    "department_name",
+    "doctor_name",
+    "contact_name",
+    "ward_name",
+    "title",
+)
+DETERMINISTIC_LOCATION_FIELDS = (
+    "location",
+    "ward",
+    "ward_name",
+    "department",
+    "department_name",
+    "site",
+    "room",
+    "area",
+)
+DETERMINISTIC_STATUS_FIELDS = (
+    "status",
+    "availability",
+    "state",
+    "condition",
+)
+DETERMINISTIC_OMITTED_DETAIL_FIELDS = {
+    "id",
+    "medicine_id",
+    "asset_id",
+    "row_number",
+    "source",
+    "source_filename",
+    "source_table",
+}
+
+
+def _normalize_payload_key(key: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", str(key).strip().lower()).strip("_")
+
+
+def _payload_value(payload: dict[str, Any], fields: tuple[str, ...]) -> Any:
+    for field in fields:
+        value = payload.get(field)
+        if value not in (None, "", []):
+            return value
+    normalized_fields = {_normalize_payload_key(field) for field in fields}
+    for key, value in payload.items():
+        if value in (None, "", []):
+            continue
+        if _normalize_payload_key(key) in normalized_fields:
+            return value
+    return None
+
+
+def _clean_entity_from_query(query: str) -> str:
+    cleaned = re.sub(
+        r"^\s*(?:info|information|details?|tell me|show me|give me)\s+(?:on|about|for)?\s*",
+        "",
+        query,
+        flags=re.IGNORECASE,
+    ).strip(" .?	\n")
+    return cleaned or "Record"
+
+
+def _lookup_row_payload(row: dict[str, Any]) -> dict[str, Any]:
+    nested = row.get("row")
+    if isinstance(nested, dict):
+        payload = dict(nested)
+        if "access_level" not in payload and row.get("access_level"):
+            payload["access_level"] = row.get("access_level")
+        return payload
+    return {
+        key: value
+        for key, value in row.items()
+        if key not in {"source_table", "source_filename"} and value not in (None, "", [])
+    }
+
+
+def _lookup_entity_name(query: str, payload: dict[str, Any]) -> str:
+    value = _payload_value(payload, DETERMINISTIC_NAME_FIELDS)
+    if value not in (None, "", []):
+        return str(value)
+    return _clean_entity_from_query(query)
+
+
+def _lookup_list_name(payload: dict[str, Any]) -> str:
+    value = _payload_value(payload, DETERMINISTIC_LIST_NAME_FIELDS)
+    if value not in (None, "", []):
+        return str(value)
+    return "Record"
+
+
+def _lookup_list_title(query: str, payload: dict[str, Any]) -> str:
+    lowered = query.lower()
+    category = str(payload.get("category") or "").lower()
+    if "medicine" in lowered or "formulary" in lowered or "drug" in lowered:
+        return "Medicines"
+    if any(marker in lowered for marker in ("equipment type", "equipment types", "asset type", "asset types", "device type", "device types")):
+        return "Equipment types"
+    if "equipment" in lowered:
+        return "Equipment"
+    if "asset" in lowered or "device" in lowered:
+        return "Assets"
+    if "doctor" in lowered or "consultant" in lowered or "physician" in lowered:
+        return "Doctors"
+    if "ward" in lowered:
+        return "Wards"
+    if "department" in lowered:
+        return "Departments"
+    return category.capitalize() if category else "Records"
+
+
+def _format_count_detail(payload: dict[str, Any]) -> str:
+    name = _payload_value(payload, DETERMINISTIC_LIST_NAME_FIELDS)
+    location = _payload_value(payload, DETERMINISTIC_LOCATION_FIELDS)
+    status = _payload_value(payload, DETERMINISTIC_STATUS_FIELDS)
+    parts: list[str] = []
+    if name not in (None, "", []):
+        parts.append(str(name))
+    if location not in (None, "", []):
+        parts.append(f"Location: {location}")
+    if status not in (None, "", []):
+        parts.append(f"Status: {status}")
+    if parts:
+        return "; ".join(parts)
+    return _lookup_list_name(payload)
+
+
+def _detail_label(field: str) -> str:
+    return DETERMINISTIC_DETAIL_LABELS.get(field, field.replace("_", " ").capitalize())
+
+
+def _detail_value(field: str, value: Any) -> str:
+    if isinstance(value, bool):
+        return "Yes" if value else "No"
+    text = str(value).strip()
+    if field == "restricted" and text.lower() in {"false", "0", "no", "n"}:
+        return "No"
+    if field == "restricted" and text.lower() in {"true", "1", "yes", "y"}:
+        return "Yes"
+    if field == "access_level":
+        return text.replace("_", " ").capitalize()
+    return text
+
+
+def _ordered_detail_fields(payload: dict[str, Any]) -> list[str]:
+    ordered = [field for field in DETERMINISTIC_DETAIL_ORDER if field in payload]
+    remaining = sorted(
+        field
+        for field, value in payload.items()
+        if field not in ordered
+        and field not in DETERMINISTIC_NAME_FIELDS
+        and field not in DETERMINISTIC_OMITTED_DETAIL_FIELDS
+        and value not in (None, "", [])
+    )
+    return ordered + remaining
+
+
+def _format_deterministic_lookup_payload(query: str, payload: dict[str, Any]) -> str:
+    lookup_plan = payload.get("lookup_plan") if isinstance(payload.get("lookup_plan"), dict) else {}
+    aggregate_result = lookup_plan.get("aggregate_result") if isinstance(lookup_plan, dict) else None
+    if isinstance(aggregate_result, dict) and aggregate_result.get("type") == "count":
+        matching_rows = aggregate_result.get("matching_rows")
+        sources = aggregate_result.get("source_filenames") or []
+        source_text = ", ".join(str(source) for source in sources) if isinstance(sources, list) else ""
+        rows = payload.get("rows")
+        if isinstance(rows, list) and rows:
+            row_payloads = [_lookup_row_payload(row) for row in rows if isinstance(row, dict)]
+            lines = [f"Total: {matching_rows} matching row(s)" + (f" in {source_text}." if source_text else ".")]
+            lines.append("")
+            lines.append("Details:")
+            for row_payload in row_payloads:
+                lines.append(f"- {_format_count_detail(row_payload)}")
+            return "\n".join(lines)
+        return (
+            "Based on the deterministic database lookup, "
+            f"I found {matching_rows} matching row(s)"
+            + (f" in {source_text}." if source_text else ".")
+            + "\n\nSource: Postgres deterministic lookup."
+        )
+
+    rows = payload.get("rows")
+    if not isinstance(rows, list) or not rows:
+        return str(payload.get("message") or "No matching deterministic database rows were found.")
+
+    if _has_list_lookup_intent(query) and len(rows) > 1:
+        row_payloads = [_lookup_row_payload(row) for row in rows if isinstance(row, dict)]
+        title = _lookup_list_title(query, row_payloads[0] if row_payloads else {})
+        lines = [f"{title} returned by deterministic lookup:"]
+        lines.append("")
+        for index, row_payload in enumerate(row_payloads, start=1):
+            name = _lookup_list_name(row_payload)
+            lines.append(f"{index}. {name}")
+        return "\n".join(lines)
+
+    first_payload = _lookup_row_payload(rows[0]) if isinstance(rows[0], dict) else {}
+    entity_name = _lookup_entity_name(query, first_payload)
+    fields = _ordered_detail_fields(first_payload)
+    if fields:
+        lines = [f"{entity_name} details are as follows:"]
+        lines.append("")
+        for field in fields:
+            lines.append(f"- {_detail_label(field)}: {_detail_value(field, first_payload[field])}")
+        return "\n".join(lines)
+
+    return str(payload.get("message") or "Found matching deterministic database row(s).")
 
 
 def _planned_tool_names(query: str) -> list[str]:
@@ -1350,6 +1693,8 @@ class KnowledgeAgent:
             "Tool selection rules:\n"
             "- Use RAG document search for policy, procedure, SOP, guideline, privacy, confidentiality, and governance questions.\n"
             "- Use deterministic Postgres lookup for exact structured facts such as doctors on call, patients, appointments, wards, contacts, departments, CSV lookup rows, and formulary rows.\n"
+            "- Use deterministic Postgres lookup for count, total, inventory, equipment, asset, device, stock, or availability questions that may be answered by uploaded CSV row values.\n"
+            "- For short entity questions such as 'info on X' or 'details about X', call deterministic Postgres lookup first when X may be a medication, asset, contact, rota, or uploaded CSV row value.\n"
             "- If the deterministic lookup result fully answers the question, answer from that result without calling extra tools.\n"
             "- For rota/date questions, only call a row 'today' when its date equals the lookup result's resolved_today value; otherwise say no matching row was found for today.\n"
             "- If a multipart question needs more than one tool, call every relevant tool and combine the results into one answer.\n"
@@ -1381,6 +1726,18 @@ class KnowledgeAgent:
         performance["llm_cache_hit"] = bool(llm_cache_hit and llm is not None)
         performance["llm_setup_cold_start"] = bool(not llm_cache_hit and llm is not None)
         if llm is None:
+            preflight_result = self._call_deterministic_entity_preflight(
+                llm=None,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                original_query=query,
+                user_context=user_context,
+                config=None,
+            )
+            if preflight_result is not None:
+                preflight_result.performance["agent_mode"] = "deterministic_preflight"
+                preflight_result.performance.update(performance)
+                return preflight_result
             result = self._offline_graph_answer(query=query, user_context=user_context)
             result.performance.update(performance)
             return result
@@ -1391,50 +1748,61 @@ class KnowledgeAgent:
         config = {"callbacks": callbacks} if callbacks else None
         try:
             agent_started = time.perf_counter()
-            fast_planned_tools = self._fast_planned_tools(query)
-            if fast_planned_tools:
-                fast_setup_started = time.perf_counter()
-                fast_cache_hit = self._llm_cache_hit(fast=True)
-                fast_llm = self._get_llm(fast=True)
-                performance["fast_llm_setup_ms"] = _elapsed_ms(fast_setup_started)
-                performance["fast_llm_cache_hit"] = bool(fast_cache_hit and fast_llm is not None)
-                performance["fast_llm_setup_cold_start"] = bool(not fast_cache_hit and fast_llm is not None)
-                result = self._call_fast_planned_agent(
-                    llm=fast_llm or llm,
-                    system_prompt=system_prompt,
-                    user_prompt=user_prompt,
-                    original_query=query,
-                    user_context=user_context,
-                    config=config,
-                    planned_tools=fast_planned_tools,
-                )
-                result.performance["agent_mode"] = "fast_planned"
-            elif self._should_use_fast_rag(query):
-                fast_setup_started = time.perf_counter()
-                fast_cache_hit = self._llm_cache_hit(fast=True)
-                fast_llm = self._get_llm(fast=True)
-                performance["fast_llm_setup_ms"] = _elapsed_ms(fast_setup_started)
-                performance["fast_llm_cache_hit"] = bool(fast_cache_hit and fast_llm is not None)
-                performance["fast_llm_setup_cold_start"] = bool(not fast_cache_hit and fast_llm is not None)
-                result = self._call_fast_rag_agent(
-                    llm=fast_llm or llm,
-                    system_prompt=system_prompt,
-                    user_prompt=user_prompt,
-                    original_query=query,
-                    user_context=user_context,
-                    config=config,
-                )
-                result.performance["agent_mode"] = "fast_rag"
+            result = self._call_deterministic_entity_preflight(
+                llm=llm,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                original_query=query,
+                user_context=user_context,
+                config=config,
+            )
+            if result is not None:
+                result.performance["agent_mode"] = "deterministic_preflight"
             else:
-                result = self._call_langgraph_agent(
-                    llm=llm,
-                    system_prompt=system_prompt,
-                    user_prompt=user_prompt,
-                    original_query=query,
-                    user_context=user_context,
-                    config=config,
-                )
-                result.performance["agent_mode"] = "langgraph"
+                fast_planned_tools = self._fast_planned_tools(query)
+                if fast_planned_tools:
+                    fast_setup_started = time.perf_counter()
+                    fast_cache_hit = self._llm_cache_hit(fast=True)
+                    fast_llm = self._get_llm(fast=True)
+                    performance["fast_llm_setup_ms"] = _elapsed_ms(fast_setup_started)
+                    performance["fast_llm_cache_hit"] = bool(fast_cache_hit and fast_llm is not None)
+                    performance["fast_llm_setup_cold_start"] = bool(not fast_cache_hit and fast_llm is not None)
+                    result = self._call_fast_planned_agent(
+                        llm=fast_llm or llm,
+                        system_prompt=system_prompt,
+                        user_prompt=user_prompt,
+                        original_query=query,
+                        user_context=user_context,
+                        config=config,
+                        planned_tools=fast_planned_tools,
+                    )
+                    result.performance["agent_mode"] = "fast_planned"
+                elif self._should_use_fast_rag(query):
+                    fast_setup_started = time.perf_counter()
+                    fast_cache_hit = self._llm_cache_hit(fast=True)
+                    fast_llm = self._get_llm(fast=True)
+                    performance["fast_llm_setup_ms"] = _elapsed_ms(fast_setup_started)
+                    performance["fast_llm_cache_hit"] = bool(fast_cache_hit and fast_llm is not None)
+                    performance["fast_llm_setup_cold_start"] = bool(not fast_cache_hit and fast_llm is not None)
+                    result = self._call_fast_rag_agent(
+                        llm=fast_llm or llm,
+                        system_prompt=system_prompt,
+                        user_prompt=user_prompt,
+                        original_query=query,
+                        user_context=user_context,
+                        config=config,
+                    )
+                    result.performance["agent_mode"] = "fast_rag"
+                else:
+                    result = self._call_langgraph_agent(
+                        llm=llm,
+                        system_prompt=system_prompt,
+                        user_prompt=user_prompt,
+                        original_query=query,
+                        user_context=user_context,
+                        config=config,
+                    )
+                    result.performance["agent_mode"] = "langgraph"
             result.performance.update(performance)
             result.performance["agent_execution_ms"] = _elapsed_ms(agent_started)
             return result
@@ -1463,6 +1831,72 @@ class KnowledgeAgent:
                 result = self._offline_graph_answer(query=query, user_context=user_context)
                 result.performance.update(performance)
                 return result
+
+    def _call_deterministic_entity_preflight(
+        self,
+        *,
+        llm: Any,
+        system_prompt: str,
+        user_prompt: str,
+        original_query: str,
+        user_context: HealthcareUserContext,
+        config: dict[str, Any] | None,
+    ) -> GraphAgentResult | None:
+        if not self.settings.deterministic_lookup_enabled:
+            return None
+        if not (
+            _has_short_entity_lookup_intent(original_query)
+            or _has_structured_row_value_intent(original_query)
+            or _has_list_lookup_intent(original_query)
+        ):
+            return None
+
+        started = time.perf_counter()
+        tool_query = original_query
+        tool_started = time.perf_counter()
+        tool_output, sources, catalog_guidance = self._run_graph_tool(
+            "postgres_deterministic_lookup",
+            tool_query,
+            user_context,
+        )
+        tool_ms = _elapsed_ms(tool_started)
+        if not _deterministic_tool_output_has_results(tool_output) and _has_short_entity_lookup_intent(original_query):
+            medicine_query = f"medicine {original_query}"
+            tool_started = time.perf_counter()
+            medicine_output, medicine_sources, medicine_guidance = self._run_graph_tool(
+                "postgres_deterministic_lookup",
+                medicine_query,
+                user_context,
+            )
+            if _deterministic_tool_output_has_results(medicine_output):
+                tool_query = medicine_query
+                tool_output = medicine_output
+                sources = medicine_sources
+                catalog_guidance = medicine_guidance
+                tool_ms += _elapsed_ms(tool_started)
+
+        if not _deterministic_tool_output_has_results(tool_output):
+            return None
+
+        tool_context = "postgres_deterministic_lookup results:\n" + tool_output
+        try:
+            payload = json.loads(tool_output)
+        except json.JSONDecodeError:
+            payload = {}
+        return GraphAgentResult(
+            answer=_format_deterministic_lookup_payload(original_query, payload if isinstance(payload, dict) else {}),
+            sources=sources,
+            tools_used=["postgres_deterministic_lookup"],
+            tool_context=self._bounded_context(tool_context),
+            catalog_guidance=catalog_guidance,
+            performance={
+                "deterministic_preflight_ms": _elapsed_ms(started),
+                "deterministic_lookup_ms": tool_ms,
+                "deterministic_preflight_query": tool_query,
+                "planned_tools": ["postgres_deterministic_lookup"],
+                "deterministic_formatter": "entity_details",
+            },
+        )
 
     def _offline_graph_answer(
         self, *, query: str, user_context: HealthcareUserContext
@@ -1911,35 +2345,7 @@ class KnowledgeAgent:
                 payload = json.loads(payload_text)
             except json.JSONDecodeError:
                 payload = {}
-            rows = payload.get("rows") if isinstance(payload, dict) else None
-            message = str(payload.get("message") or "") if isinstance(payload, dict) else ""
-            lookup_plan = payload.get("lookup_plan") if isinstance(payload, dict) else {}
-            aggregate_result = lookup_plan.get("aggregate_result") if isinstance(lookup_plan, dict) else None
-            if isinstance(aggregate_result, dict) and aggregate_result.get("type") == "count":
-                matching_rows = aggregate_result.get("matching_rows")
-                sources = aggregate_result.get("source_filenames") or []
-                source_text = ", ".join(str(source) for source in sources) if isinstance(sources, list) else ""
-                return (
-                    "Based on the deterministic database lookup, "
-                    f"I found {matching_rows} matching row(s)"
-                    + (f" in {source_text}." if source_text else ".")
-                    + "\n\nSource: Postgres deterministic lookup."
-                )
-            if isinstance(rows, list) and rows:
-                lines = [
-                    "Based on the deterministic database lookup, here is the exact matching information:"
-                ]
-                for index, row in enumerate(rows[:5], start=1):
-                    if isinstance(row, dict):
-                        visible = {
-                            key: value
-                            for key, value in row.items()
-                            if value not in (None, "", [])
-                        }
-                        lines.append(f"{index}. " + "; ".join(f"{key}: {value}" for key, value in visible.items()))
-                lines.append("\nSource: Postgres deterministic lookup.")
-                return "\n".join(lines)
-            return message or "No matching deterministic database rows were found."
+            return _format_deterministic_lookup_payload(query, payload if isinstance(payload, dict) else {})
 
         if "No relevant document chunks found." in tool_context:
             return (
