@@ -70,6 +70,7 @@ ROW_VALUE_QUERY_MARKERS = {
     "devices",
     "ecg",
     "equipment",
+    "equipments",
     "inventory",
     "machine",
     "machines",
@@ -93,6 +94,7 @@ ROW_VALUE_GENERIC_QUERY_MARKERS = {
     "device",
     "devices",
     "equipment",
+    "equipments",
     "inventory",
     "machine",
     "machines",
@@ -392,10 +394,13 @@ def _has_list_intent(query: str) -> bool:
     return bool(terms & {"all", "available", "every", "list", "show"})
 
 
-def _is_equipment_type_list_query(query: str) -> bool:
+def _is_equipment_asset_list_query(query: str) -> bool:
     q = query.lower()
     if not _has_list_intent(query):
         return False
+    terms = set(_terms(query))
+    if terms & {"equipment", "equipments", "asset", "assets", "device", "devices"}:
+        return True
     return any(
         marker in q
         for marker in (
@@ -540,7 +545,7 @@ class DeterministicLookupService:
         distinct_field = ""
         try:
             handled_distinct_lookup = False
-            if _is_equipment_type_list_query(query):
+            if _is_equipment_asset_list_query(query):
                 distinct_field = "equipment_type"
                 row_value_search_used = True
                 rows = self._query_uploaded_distinct_field_values(

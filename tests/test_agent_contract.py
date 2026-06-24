@@ -719,7 +719,7 @@ class AgentContractTests(unittest.TestCase):
         self.assertNotIn("Approval required:", result.answer)
         self.assertNotIn("Access level:", result.answer)
 
-    def test_list_all_equipment_types_formats_unique_type_names(self):
+    def test_list_all_equipment_formats_unique_type_names(self):
         retrieval = FakeRetrieval()
         lookup = FakeDeterministicLookup(
             FakeLookupResult(
@@ -753,15 +753,16 @@ class AgentContractTests(unittest.TestCase):
         )
         agent.deterministic_lookup = lookup
 
-        result = agent.answer("user", "list all equipment types in assets", session_id="session")
+        result = agent.answer("user", "list all equipment we have", session_id="session")
 
         self.assertEqual(result.tools_used, ["postgres_deterministic_lookup"])
         self.assertEqual(lookup.calls[0]["limit"], 100)
         self.assertIn("equipment_assets.csv", [asset["filename"] for asset in lookup.calls[0]["csv_assets"]])
-        self.assertIn("Equipment types returned by deterministic lookup:", result.answer)
+        self.assertIn("Equipment returned by deterministic lookup:", result.answer)
         self.assertIn("1. Ventilator", result.answer)
         self.assertIn("2. Infusion Pump", result.answer)
         self.assertNotIn("Equipment fault Desk", result.answer)
+        self.assertNotIn("Record", result.answer)
         self.assertNotIn("Category:", result.answer)
 
     def test_equipment_count_formats_total_location_and_status(self):

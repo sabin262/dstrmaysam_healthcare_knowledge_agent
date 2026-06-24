@@ -348,7 +348,7 @@ class DeterministicLookupToolTests(unittest.TestCase):
         service = FakeDistinctEquipmentTypeLookup()
 
         result = service.lookup(
-            "list all equipment types in assets",
+            "list all equipment we have",
             HealthcareUserContext(user_id="admin", roles=("admin",)),
             limit=100,
             csv_assets=[

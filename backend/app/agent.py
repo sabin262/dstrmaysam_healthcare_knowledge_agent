@@ -162,6 +162,7 @@ STRUCTURED_ROW_VALUE_MARKERS = {
     "devices",
     "ecg",
     "equipment",
+    "equipments",
     "inventory",
     "machine",
     "machines",
@@ -637,7 +638,9 @@ def _lookup_list_title(query: str, payload: dict[str, Any]) -> str:
         return "Medicines"
     if any(marker in lowered for marker in ("equipment type", "equipment types", "asset type", "asset types", "device type", "device types")):
         return "Equipment types"
-    if "asset" in lowered or "equipment" in lowered or "device" in lowered:
+    if "equipment" in lowered:
+        return "Equipment"
+    if "asset" in lowered or "device" in lowered:
         return "Assets"
     if "doctor" in lowered or "consultant" in lowered or "physician" in lowered:
         return "Doctors"
