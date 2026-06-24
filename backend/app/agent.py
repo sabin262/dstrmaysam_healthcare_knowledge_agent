@@ -43,6 +43,10 @@ HEALTHCARE_TOOL_NAMES = [
     "safety_guard",
 ]
 RETRIEVAL_SOURCE_TOOLS = {"rag_search", "document_search", "policy_search"}
+CHAT_EXECUTION_MODE_LABELS = {
+    "deterministic_agent": "Deterministic + Agent",
+    "agent_only": "Agent only",
+}
 MAX_GRAPH_LLM_CALLS = 5
 CATALOG_RAG_CANDIDATE_LIMIT = 8
 POLICY_DOMAINS = {"clinical_policy", "admin_policy", "compliance"}
@@ -203,6 +207,14 @@ def estimate_tokens(text: str) -> int:
 
 def _elapsed_ms(started: float) -> int:
     return int((time.perf_counter() - started) * 1000)
+
+
+def _normalize_chat_execution_mode(mode: str | None) -> str:
+    return mode if mode in CHAT_EXECUTION_MODE_LABELS else "deterministic_agent"
+
+
+def _chat_execution_mode_label(mode: str | None) -> str:
+    return CHAT_EXECUTION_MODE_LABELS[_normalize_chat_execution_mode(mode)]
 
 
 def _add_timing(timing: dict[str, int], key: str, elapsed_ms: int) -> None:
@@ -1103,11 +1115,16 @@ class KnowledgeAgent:
         query: str,
         session_id: str | None = None,
         user_context: HealthcareUserContext | None = None,
+        execution_mode: str | None = None,
     ) -> AgentResult:
         started = time.perf_counter()
         performance: dict[str, Any] = {}
         session_id = session_id or uuid.uuid4().hex
         user_context = user_context or HealthcareUserContext(user_id=user_id)
+        execution_mode = _normalize_chat_execution_mode(execution_mode)
+        execution_mode_label = _chat_execution_mode_label(execution_mode)
+        performance["chat_execution_mode"] = execution_mode
+        performance["chat_execution_mode_label"] = execution_mode_label
         redaction = self.redactor.redact(query)
         safe_query = redaction.redacted_text
         history_started = time.perf_counter()
@@ -1120,7 +1137,12 @@ class KnowledgeAgent:
             user_id=user_id,
             session_id=session_id,
             query=safe_query,
-            metadata={"roles": list(user_context.roles), "departments": list(user_context.departments)},
+            metadata={
+                "roles": list(user_context.roles),
+                "departments": list(user_context.departments),
+                "chat_execution_mode": execution_mode,
+                "chat_execution_mode_label": execution_mode_label,
+            },
         )
         performance["langfuse_trace_create_ms"] = _elapsed_ms(trace_create_started)
         trace_enter_started = time.perf_counter()
@@ -1151,6 +1173,7 @@ class KnowledgeAgent:
                     query=safe_query,
                     user_context=user_context,
                     initial_safety=initial_safety.as_dict(),
+                    execution_mode=execution_mode,
                 )
 
                 answer = graph_result.answer
@@ -1186,6 +1209,8 @@ class KnowledgeAgent:
                     "guardrail_applied": bool(performance.get("response_guardrail_applied")),
                     "guardrail_reason": performance.get("response_guardrail_reason"),
                     "agent_mode": performance.get("agent_mode"),
+                    "chat_execution_mode": execution_mode,
+                    "chat_execution_mode_label": execution_mode_label,
                 }
                 audit_event = self.audit.log_chat_event(
                     user=user_context,
@@ -1220,6 +1245,8 @@ class KnowledgeAgent:
                         "app_env": self.settings.app_env,
                         "model": self.settings.azure_openai_deployment or "unknown",
                         "prompt_label": self.settings.prompt_label,
+                        "chat_execution_mode": execution_mode,
+                        "chat_execution_mode_label": execution_mode_label,
                         "source_document_keys": trace_metadata["source_document_keys"],
                         "guardrail_applied": trace_metadata["guardrail_applied"],
                         "guardrail_reason": trace_metadata["guardrail_reason"],
@@ -1712,8 +1739,12 @@ class KnowledgeAgent:
         query: str,
         user_context: HealthcareUserContext,
         initial_safety: dict[str, Any],
+        execution_mode: str = "deterministic_agent",
     ) -> GraphAgentResult:
         performance: dict[str, Any] = {}
+        execution_mode = _normalize_chat_execution_mode(execution_mode)
+        performance["chat_execution_mode"] = execution_mode
+        performance["chat_execution_mode_label"] = _chat_execution_mode_label(execution_mode)
         user_prompt = self._graph_user_prompt(
             history_context=history_context,
             query=query,
@@ -1726,18 +1757,19 @@ class KnowledgeAgent:
         performance["llm_cache_hit"] = bool(llm_cache_hit and llm is not None)
         performance["llm_setup_cold_start"] = bool(not llm_cache_hit and llm is not None)
         if llm is None:
-            preflight_result = self._call_deterministic_entity_preflight(
-                llm=None,
-                system_prompt=system_prompt,
-                user_prompt=user_prompt,
-                original_query=query,
-                user_context=user_context,
-                config=None,
-            )
-            if preflight_result is not None:
-                preflight_result.performance["agent_mode"] = "deterministic_preflight"
-                preflight_result.performance.update(performance)
-                return preflight_result
+            if execution_mode == "deterministic_agent":
+                preflight_result = self._call_deterministic_entity_preflight(
+                    llm=None,
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    original_query=query,
+                    user_context=user_context,
+                    config=None,
+                )
+                if preflight_result is not None:
+                    preflight_result.performance["agent_mode"] = "deterministic_preflight"
+                    preflight_result.performance.update(performance)
+                    return preflight_result
             result = self._offline_graph_answer(query=query, user_context=user_context)
             result.performance.update(performance)
             return result
@@ -1748,61 +1780,72 @@ class KnowledgeAgent:
         config = {"callbacks": callbacks} if callbacks else None
         try:
             agent_started = time.perf_counter()
-            result = self._call_deterministic_entity_preflight(
-                llm=llm,
-                system_prompt=system_prompt,
-                user_prompt=user_prompt,
-                original_query=query,
-                user_context=user_context,
-                config=config,
-            )
-            if result is not None:
-                result.performance["agent_mode"] = "deterministic_preflight"
+            if execution_mode == "agent_only":
+                result = self._call_langgraph_agent(
+                    llm=llm,
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    original_query=query,
+                    user_context=user_context,
+                    config=config,
+                )
+                result.performance["agent_mode"] = "langgraph"
             else:
-                fast_planned_tools = self._fast_planned_tools(query)
-                if fast_planned_tools:
-                    fast_setup_started = time.perf_counter()
-                    fast_cache_hit = self._llm_cache_hit(fast=True)
-                    fast_llm = self._get_llm(fast=True)
-                    performance["fast_llm_setup_ms"] = _elapsed_ms(fast_setup_started)
-                    performance["fast_llm_cache_hit"] = bool(fast_cache_hit and fast_llm is not None)
-                    performance["fast_llm_setup_cold_start"] = bool(not fast_cache_hit and fast_llm is not None)
-                    result = self._call_fast_planned_agent(
-                        llm=fast_llm or llm,
-                        system_prompt=system_prompt,
-                        user_prompt=user_prompt,
-                        original_query=query,
-                        user_context=user_context,
-                        config=config,
-                        planned_tools=fast_planned_tools,
-                    )
-                    result.performance["agent_mode"] = "fast_planned"
-                elif self._should_use_fast_rag(query):
-                    fast_setup_started = time.perf_counter()
-                    fast_cache_hit = self._llm_cache_hit(fast=True)
-                    fast_llm = self._get_llm(fast=True)
-                    performance["fast_llm_setup_ms"] = _elapsed_ms(fast_setup_started)
-                    performance["fast_llm_cache_hit"] = bool(fast_cache_hit and fast_llm is not None)
-                    performance["fast_llm_setup_cold_start"] = bool(not fast_cache_hit and fast_llm is not None)
-                    result = self._call_fast_rag_agent(
-                        llm=fast_llm or llm,
-                        system_prompt=system_prompt,
-                        user_prompt=user_prompt,
-                        original_query=query,
-                        user_context=user_context,
-                        config=config,
-                    )
-                    result.performance["agent_mode"] = "fast_rag"
+                result = self._call_deterministic_entity_preflight(
+                    llm=llm,
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    original_query=query,
+                    user_context=user_context,
+                    config=config,
+                )
+                if result is not None:
+                    result.performance["agent_mode"] = "deterministic_preflight"
                 else:
-                    result = self._call_langgraph_agent(
-                        llm=llm,
-                        system_prompt=system_prompt,
-                        user_prompt=user_prompt,
-                        original_query=query,
-                        user_context=user_context,
-                        config=config,
-                    )
-                    result.performance["agent_mode"] = "langgraph"
+                    fast_planned_tools = self._fast_planned_tools(query)
+                    if fast_planned_tools:
+                        fast_setup_started = time.perf_counter()
+                        fast_cache_hit = self._llm_cache_hit(fast=True)
+                        fast_llm = self._get_llm(fast=True)
+                        performance["fast_llm_setup_ms"] = _elapsed_ms(fast_setup_started)
+                        performance["fast_llm_cache_hit"] = bool(fast_cache_hit and fast_llm is not None)
+                        performance["fast_llm_setup_cold_start"] = bool(not fast_cache_hit and fast_llm is not None)
+                        result = self._call_fast_planned_agent(
+                            llm=fast_llm or llm,
+                            system_prompt=system_prompt,
+                            user_prompt=user_prompt,
+                            original_query=query,
+                            user_context=user_context,
+                            config=config,
+                            planned_tools=fast_planned_tools,
+                        )
+                        result.performance["agent_mode"] = "fast_planned"
+                    elif self._should_use_fast_rag(query):
+                        fast_setup_started = time.perf_counter()
+                        fast_cache_hit = self._llm_cache_hit(fast=True)
+                        fast_llm = self._get_llm(fast=True)
+                        performance["fast_llm_setup_ms"] = _elapsed_ms(fast_setup_started)
+                        performance["fast_llm_cache_hit"] = bool(fast_cache_hit and fast_llm is not None)
+                        performance["fast_llm_setup_cold_start"] = bool(not fast_cache_hit and fast_llm is not None)
+                        result = self._call_fast_rag_agent(
+                            llm=fast_llm or llm,
+                            system_prompt=system_prompt,
+                            user_prompt=user_prompt,
+                            original_query=query,
+                            user_context=user_context,
+                            config=config,
+                        )
+                        result.performance["agent_mode"] = "fast_rag"
+                    else:
+                        result = self._call_langgraph_agent(
+                            llm=llm,
+                            system_prompt=system_prompt,
+                            user_prompt=user_prompt,
+                            original_query=query,
+                            user_context=user_context,
+                            config=config,
+                        )
+                        result.performance["agent_mode"] = "langgraph"
             result.performance.update(performance)
             result.performance["agent_execution_ms"] = _elapsed_ms(agent_started)
             return result

@@ -1,5 +1,6 @@
 import unittest
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from unittest import mock
 
 from backend.app.auth import AuthService, AuthenticationError, UserManagementError, hash_password
@@ -268,9 +269,31 @@ class FakeAgent:
 
     def __init__(self):
         self.invalidated = False
+        self.answer_calls = []
 
     def invalidate_caches(self):
         self.invalidated = True
+
+    def answer(self, **kwargs):
+        self.answer_calls.append(kwargs)
+        return SimpleNamespace(
+            session_id=kwargs.get("session_id") or "session",
+            answer="Answer",
+            sources=[],
+            tools_used=[],
+            input_tokens=1,
+            output_tokens=1,
+            latency_ms=10,
+            trace_id="trace-chat",
+            metadata={
+                "safety": {},
+                "audit_event": {},
+                "performance": {
+                    "chat_execution_mode": kwargs.get("execution_mode") or "deterministic_agent",
+                },
+                "latency_breakdown": {},
+            },
+        )
 
 
 class FakeRetrievalService:
@@ -384,6 +407,26 @@ class AdminDocumentApiTests(unittest.TestCase):
     def headers_for(self, username: str, password: str) -> dict[str, str]:
         token = self.auth.login(username, password).access_token
         return {"Authorization": f"Bearer {token}"}
+
+    def test_chat_defaults_to_deterministic_agent_execution_mode(self):
+        response = self.client.post(
+            "/chat",
+            headers=self.headers_for("staff", "staffpass1"),
+            json={"query": "hello"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.agent.answer_calls[-1]["execution_mode"], "deterministic_agent")
+
+    def test_chat_accepts_agent_only_execution_mode(self):
+        response = self.client.post(
+            "/chat",
+            headers=self.headers_for("staff", "staffpass1"),
+            json={"query": "hello", "execution_mode": "agent_only"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.agent.answer_calls[-1]["execution_mode"], "agent_only")
 
     def test_admin_can_upload_document_to_raw_s3_prefix(self):
         response = self.client.post(
@@ -566,6 +609,8 @@ class AdminDocumentApiTests(unittest.TestCase):
                     "input_tokens": 10,
                     "output_tokens": 6,
                     "model": "gpt-4.1-mini",
+                    "chat_execution_mode": "agent_only",
+                    "chat_execution_mode_label": "Agent only",
                     "sources": [{"uri": "s3://bucket/raw/policy.md"}],
                     "source_document_keys": ["raw/policy.md"],
                     "catalog_guidance": [
@@ -625,6 +670,8 @@ class AdminDocumentApiTests(unittest.TestCase):
         self.assertEqual(payload["summary"]["model_counts"]["gpt-4.1-mini"], 1)
         self.assertEqual(payload["queries"][0]["user_id"], "staff")
         self.assertEqual(payload["queries"][0]["trace_id"], "trace-123")
+        self.assertEqual(payload["queries"][0]["chat_execution_mode"], "agent_only")
+        self.assertEqual(payload["queries"][0]["chat_execution_mode_label"], "Agent only")
         self.assertEqual(payload["queries"][0]["total_tokens"], 16)
         self.assertEqual(payload["queries"][0]["tool_flow_summary"], "document_catalog -> rag_search")
         self.assertEqual(payload["queries"][0]["tool_flow"][0]["tool"], "document_catalog")

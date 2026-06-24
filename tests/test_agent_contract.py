@@ -658,6 +658,63 @@ class AgentContractTests(unittest.TestCase):
             "formulary_upload.csv",
             [asset["filename"] for asset in lookup.calls[0]["csv_assets"]],
         )
+        self.assertEqual(result.metadata["chat_execution_mode"], "deterministic_agent")
+        self.assertEqual(result.metadata["chat_execution_mode_label"], "Deterministic + Agent")
+
+    def test_agent_only_skips_deterministic_preflight_but_allows_lookup_tool(self):
+        retrieval = FakeRetrieval()
+        fake_llm = FakeLLM(
+            [
+                fake_ai_message(
+                    tool_calls=[
+                        {
+                            "name": "postgres_deterministic_lookup",
+                            "args": {"query": "info on Morphine"},
+                            "id": "call-1",
+                        }
+                    ]
+                ),
+                fake_ai_message("Morphine details from deterministic lookup."),
+                fake_ai_message("Morphine details from deterministic lookup."),
+            ]
+        )
+        lookup = FakeDeterministicLookup(
+            FakeLookupResult(
+                {
+                    "category": "directory",
+                    "message": "Found 1 matching row(s).",
+                    "rows": [
+                        {
+                            "source_table": "uploaded_lookup_rows",
+                            "source_filename": "formulary_upload.csv",
+                            "row": {"medicine_name": "Morphine", "category": "Opioid analgesic"},
+                        }
+                    ],
+                }
+            )
+        )
+        agent = make_agent(
+            fake_llm,
+            retrieval=retrieval,
+            app_settings=settings(chat_fast_planned_execution_enabled=True, chat_fast_rag_enabled=True),
+        )
+        agent.deterministic_lookup = lookup
+
+        result = agent.answer(
+            "user",
+            "info on Morphine",
+            session_id="session",
+            execution_mode="agent_only",
+        )
+
+        self.assertEqual(result.answer, "Morphine details from deterministic lookup.")
+        self.assertEqual(result.tools_used, ["postgres_deterministic_lookup"])
+        self.assertEqual(result.metadata["performance"]["agent_mode"], "langgraph")
+        self.assertEqual(result.metadata["chat_execution_mode"], "agent_only")
+        self.assertEqual(result.metadata["chat_execution_mode_label"], "Agent only")
+        self.assertEqual(result.metadata["performance"]["chat_execution_mode"], "agent_only")
+        self.assertEqual(len(fake_llm.messages), 2)
+        self.assertEqual(len(lookup.calls), 1)
 
     def test_list_all_medicines_uses_full_limit_and_formats_multiple_rows(self):
         retrieval = FakeRetrieval()
