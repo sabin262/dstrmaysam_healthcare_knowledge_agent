@@ -7,12 +7,24 @@ from .config import AppSettings
 
 
 LOCAL_AWS_CREDENTIAL_ENVS = {"local", "test"}
+ECS_CREDENTIAL_ENVS = {
+    "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+    "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+    "ECS_CONTAINER_METADATA_URI",
+    "ECS_CONTAINER_METADATA_URI_V4",
+}
+
+
+def _running_on_ecs() -> bool:
+    return any(os.getenv(name) for name in ECS_CREDENTIAL_ENVS) or os.getenv("AWS_EXECUTION_ENV", "").startswith(
+        "AWS_ECS"
+    )
 
 
 def boto3_session(settings: AppSettings) -> Any:
     import boto3
 
-    if settings.app_env.lower() in LOCAL_AWS_CREDENTIAL_ENVS:
+    if settings.app_env.lower() in LOCAL_AWS_CREDENTIAL_ENVS and not _running_on_ecs():
         access_key = os.getenv("AWS_ACCESS_KEY_ID") or None
         secret_key = os.getenv("AWS_SECRET_ACCESS_KEY") or None
         session_token = os.getenv("AWS_SESSION_TOKEN") or None

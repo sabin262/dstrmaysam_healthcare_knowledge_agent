@@ -69,6 +69,24 @@ class AwsSessionTests(unittest.TestCase):
 
         self.assertEqual(calls[-1], {"region_name": "eu-west-2"})
 
+    def test_ecs_metadata_uses_default_chain_even_if_static_env_keys_exist(self):
+        calls = []
+        fake_boto3 = types.SimpleNamespace(Session=lambda **kwargs: calls.append(kwargs) or object())
+        with mock.patch.dict(
+            os.environ,
+            {
+                "AWS_ACCESS_KEY_ID": "ignored-key",
+                "AWS_SECRET_ACCESS_KEY": "ignored-secret",
+                "AWS_SESSION_TOKEN": "ignored-token",
+                "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI": "/v2/credentials/task-role",
+                "AWS_EXECUTION_ENV": "AWS_ECS_FARGATE",
+            },
+            clear=False,
+        ), mock.patch.dict("sys.modules", {"boto3": fake_boto3}):
+            boto3_session(settings("local"))
+
+        self.assertEqual(calls[-1], {"region_name": "eu-west-2"})
+
 
 if __name__ == "__main__":
     unittest.main()
