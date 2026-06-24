@@ -972,6 +972,8 @@ def admin_dashboard(
         tools_used = [str(tool) for tool in metadata.get("tools_used", [])]
         tool_flow = _tool_flow_from_metadata(metadata, tools_used)
         sources = metadata.get("sources", []) if isinstance(metadata.get("sources"), list) else []
+        chat_execution_mode = str(metadata.get("chat_execution_mode") or "deterministic_agent")
+        chat_execution_mode_label = str(metadata.get("chat_execution_mode_label") or "Deterministic + Agent")
         latency_ms = int(metadata.get("latency_ms") or performance.get("total_ms") or 0)
         latency_breakdown = _dashboard_latency_breakdown(metadata, performance, latency_ms)
         input_token_count = int(metadata.get("input_tokens") or 0)
@@ -1020,6 +1022,8 @@ def admin_dashboard(
                 "tools_used": tools_used,
                 "tool_flow": tool_flow,
                 "tool_flow_summary": _tool_flow_summary(tool_flow),
+                "chat_execution_mode": chat_execution_mode,
+                "chat_execution_mode_label": chat_execution_mode_label,
                 "source_count": len(sources),
                 "source_document_keys": metadata.get("source_document_keys", []),
                 "latency_ms": latency_ms,
@@ -1116,6 +1120,7 @@ def chat(request: ChatRequest, user: HealthcareUserContext = Depends(active_user
         query=request.query,
         session_id=request.session_id,
         user_context=user,
+        execution_mode=request.execution_mode,
     )
     return ChatResponse(
         session_id=result.session_id,
