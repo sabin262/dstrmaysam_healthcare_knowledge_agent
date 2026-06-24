@@ -190,6 +190,7 @@ class IngestionJob:
             if existing_document and existing_document.get("checksum") == checksum and not force_reindex:
                 skipped_documents += 1
                 unchanged_document = dict(existing_document)
+                unchanged_document.setdefault("uri", f"s3://{self.settings.s3_bucket}/{key}")
                 unchanged_document["ingestion_status"] = "skipped_unchanged"
                 manifest_documents.append(unchanged_document)
                 continue
@@ -211,6 +212,7 @@ class IngestionJob:
                 {
                     "key": document.key,
                     "title": document.title,
+                    "uri": f"s3://{self.settings.s3_bucket}/{document.key}",
                     "content_type": document.content_type,
                     "checksum": document.checksum,
                     "metadata": document.metadata,

@@ -242,6 +242,7 @@ class LocalModeTests(unittest.TestCase):
             self.assertEqual(result["documents"][0]["key"], "postgres://uploaded_lookup_rows/doctor_rota.csv")
             self.assertEqual(result["documents"][0]["ingestion_status"], "metadata_only")
             self.assertEqual(result["documents"][1]["key"], "raw/policy.txt")
+            self.assertEqual(result["documents"][1]["uri"], "local://raw/policy.txt")
             self.assertEqual(result["indexed_documents"], 1)
 
     def test_local_chroma_retrieval_returns_hits_and_neighbors(self):

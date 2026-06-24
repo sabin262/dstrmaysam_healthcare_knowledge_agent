@@ -94,6 +94,34 @@ class FakeDocuments(DocumentStore):
                     "allowed_roles": ["staff", "admin", "doctor"],
                 },
             ),
+            DocumentRecord(
+                title="formulary_upload.csv",
+                uri="postgres://uploaded_lookup_rows/formulary_upload.csv",
+                key="postgres://uploaded_lookup_rows/formulary_upload.csv",
+                content_type="text/csv",
+                metadata={
+                    "asset_source": "postgres_uploaded_lookup",
+                    "columns": ["medicine_name", "category", "notes"],
+                    "row_count": 3,
+                    "semantic_terms": ["morphine", "opioid", "analgesic"],
+                    "categorical_values": {"medicine_name": ["Morphine"]},
+                    "allowed_roles": ["staff", "admin", "doctor", "pharmacy"],
+                },
+            ),
+            DocumentRecord(
+                title="equipment_assets.csv",
+                uri="postgres://uploaded_lookup_rows/equipment_assets.csv",
+                key="postgres://uploaded_lookup_rows/equipment_assets.csv",
+                content_type="text/csv",
+                metadata={
+                    "asset_source": "postgres_uploaded_lookup",
+                    "columns": ["asset_id", "equipment_type", "location", "status"],
+                    "row_count": 30,
+                    "semantic_terms": ["asset", "equipment", "ventilator", "infusion", "pump"],
+                    "categorical_values": {"equipment_type": ["Ventilator", "Infusion Pump"]},
+                    "allowed_roles": ["staff", "admin", "doctor"],
+                },
+            ),
         ]
 
     def lookup_table(self, query: str, limit: int = 10):
@@ -139,17 +167,27 @@ class FakeLLM:
 
 
 class FakeLookupResult:
+    def __init__(self, payload=None):
+        self.payload = payload or {
+            "category": "doctor",
+            "message": "Found 1 matching row(s).",
+            "rows": [{"doctor": "Dr Smith", "status": "on call"}],
+        }
+
     def to_json(self):
-        return '{"category":"doctor","message":"Found 1 matching row(s).","rows":[{"doctor":"Dr Smith","status":"on call"}]}'
+        import json
+
+        return json.dumps(self.payload)
 
 
 class FakeDeterministicLookup:
-    def __init__(self):
+    def __init__(self, result=None):
         self.calls = []
+        self.result = result or FakeLookupResult()
 
-    def lookup(self, query, user, csv_assets=None):
-        self.calls.append({"query": query, "user": user.user_id, "csv_assets": list(csv_assets or [])})
-        return FakeLookupResult()
+    def lookup(self, query, user, limit=10, csv_assets=None):
+        self.calls.append({"query": query, "user": user.user_id, "limit": limit, "csv_assets": list(csv_assets or [])})
+        return self.result
 
 
 class EventHistory(InMemoryChatHistoryRepository):
@@ -282,7 +320,7 @@ class AgentContractTests(unittest.TestCase):
         self.assertTrue(status["fast_llm_available"])
         self.assertTrue(status["fast_llm_cache_hit"])
         self.assertIn("llm_warmup_call_ms", status)
-        self.assertEqual(status["document_count"], 4)
+        self.assertEqual(status["document_count"], 6)
         self.assertTrue(agent.warmup_status()["total_ms"] >= 0)
 
     def test_fake_llm_records_one_selected_tool(self):
@@ -558,6 +596,230 @@ class AgentContractTests(unittest.TestCase):
         self.assertEqual(len(lookup.calls), 1)
         self.assertEqual(result.metadata["performance"]["agent_mode"], "langgraph")
         self.assertEqual(lookup.calls[0]["csv_assets"][0]["filename"], "doctor_rota.csv")
+
+    def test_short_entity_info_query_uses_deterministic_preflight(self):
+        retrieval = FakeRetrieval()
+        fake_llm = FakeLLM([fake_ai_message("Morphine is listed as an opioid analgesic.")])
+        lookup = FakeDeterministicLookup(
+            FakeLookupResult(
+                {
+                    "category": "directory",
+                    "message": "Found 1 matching row(s).",
+                    "lookup_plan": {
+                        "row_value_search_used": True,
+                        "matched_csv_sources": ["formulary_upload.csv"],
+                    },
+                    "rows": [
+                        {
+                            "source_table": "uploaded_lookup_rows",
+                            "source_filename": "formulary_upload.csv",
+                            "row": {
+                                "medicine_name": "Morphine",
+                                "category": "Opioid analgesic",
+                                "restricted": "No",
+                                "approval_required": "No special approval",
+                                "max_adult_dose": "Dose by renal function",
+                                "monitoring_required": "INR (International Normalized Ratio)",
+                                "access_level": "all_staff",
+                                "notes": "Use according to approved formulary guidance.",
+                            },
+                        }
+                    ],
+                }
+            )
+        )
+        agent = make_agent(
+            fake_llm,
+            retrieval=retrieval,
+            app_settings=settings(chat_fast_planned_execution_enabled=True, chat_fast_rag_enabled=True),
+        )
+        agent.deterministic_lookup = lookup
+
+        result = agent.answer("user", "info on Morphine", session_id="session")
+
+        self.assertEqual(
+            result.answer,
+            "Morphine details are as follows:\n\n"
+            "- Category: Opioid analgesic\n"
+            "- Restricted: No\n"
+            "- Approval required: No special approval\n"
+            "- Maximum adult dose: Dose by renal function\n"
+            "- Monitoring required: INR (International Normalized Ratio)\n"
+            "- Access level: All staff\n"
+            "- Notes: Use according to approved formulary guidance.",
+        )
+        self.assertEqual(result.tools_used, ["postgres_deterministic_lookup"])
+        self.assertEqual(result.metadata["performance"]["agent_mode"], "deterministic_preflight")
+        self.assertEqual(len(lookup.calls), 1)
+        self.assertEqual(lookup.calls[0]["query"], "info on Morphine")
+        self.assertEqual(retrieval.calls, [])
+        self.assertEqual(fake_llm.messages, [])
+        self.assertIn(
+            "formulary_upload.csv",
+            [asset["filename"] for asset in lookup.calls[0]["csv_assets"]],
+        )
+
+    def test_list_all_medicines_uses_full_limit_and_formats_multiple_rows(self):
+        retrieval = FakeRetrieval()
+        lookup = FakeDeterministicLookup(
+            FakeLookupResult(
+                {
+                    "category": "formulary",
+                    "message": "Found 3 matching row(s).",
+                    "rows": [
+                        {
+                            "Medicine Name": "Morphine",
+                            "category": "Antibiotic",
+                            "restricted": "No",
+                            "approval_required": "No special approval",
+                            "max_adult_dose": "Dose by renal function",
+                            "monitoring_required": "INR",
+                            "access_level": "all_staff",
+                        },
+                        {
+                            "medicine_name": "Diazepam",
+                            "category": "Cardiac",
+                            "restricted": "No",
+                            "approval_required": "No special approval",
+                            "max_adult_dose": "Per protocol",
+                            "monitoring_required": "INR",
+                            "access_level": "all_staff",
+                        },
+                        {
+                            "medicine_name": "Paracetamol",
+                            "category": "Oncology",
+                            "restricted": "No",
+                            "approval_required": "No special approval",
+                            "max_adult_dose": "See formulary notes",
+                            "monitoring_required": "INR",
+                            "access_level": "all_staff",
+                        },
+                    ],
+                }
+            )
+        )
+        agent = make_agent(
+            FakeLLM([fake_ai_message("Unused LLM response")]),
+            retrieval=retrieval,
+            app_settings=settings(chat_fast_planned_execution_enabled=True, chat_fast_rag_enabled=True),
+        )
+        agent.deterministic_lookup = lookup
+
+        result = agent.answer("user", "list all medicine", session_id="session")
+
+        self.assertEqual(result.tools_used, ["postgres_deterministic_lookup"])
+        self.assertEqual(result.metadata["performance"]["agent_mode"], "deterministic_preflight")
+        self.assertEqual(lookup.calls[0]["limit"], 100)
+        self.assertEqual(retrieval.calls, [])
+        self.assertIn("Medicines returned by deterministic lookup:", result.answer)
+        self.assertIn("1. Morphine", result.answer)
+        self.assertIn("2. Diazepam", result.answer)
+        self.assertIn("3. Paracetamol", result.answer)
+        self.assertNotIn("Category:", result.answer)
+        self.assertNotIn("Approval required:", result.answer)
+        self.assertNotIn("Access level:", result.answer)
+
+    def test_list_all_equipment_types_formats_unique_type_names(self):
+        retrieval = FakeRetrieval()
+        lookup = FakeDeterministicLookup(
+            FakeLookupResult(
+                {
+                    "category": "directory",
+                    "message": "Found 2 matching row(s).",
+                    "lookup_plan": {
+                        "row_value_search_used": True,
+                        "distinct_field": "equipment_type",
+                        "matched_csv_sources": ["equipment_assets.csv"],
+                    },
+                    "rows": [
+                        {
+                            "source_table": "uploaded_lookup_rows",
+                            "source_filename": "equipment_assets.csv",
+                            "row": {"equipment_type": "Ventilator"},
+                        },
+                        {
+                            "source_table": "uploaded_lookup_rows",
+                            "source_filename": "equipment_assets.csv",
+                            "row": {"equipment_type": "Infusion Pump"},
+                        },
+                    ],
+                }
+            )
+        )
+        agent = make_agent(
+            FakeLLM([fake_ai_message("Unused LLM response")]),
+            retrieval=retrieval,
+            app_settings=settings(chat_fast_planned_execution_enabled=True, chat_fast_rag_enabled=True),
+        )
+        agent.deterministic_lookup = lookup
+
+        result = agent.answer("user", "list all equipment types in assets", session_id="session")
+
+        self.assertEqual(result.tools_used, ["postgres_deterministic_lookup"])
+        self.assertEqual(lookup.calls[0]["limit"], 100)
+        self.assertIn("equipment_assets.csv", [asset["filename"] for asset in lookup.calls[0]["csv_assets"]])
+        self.assertIn("Equipment types returned by deterministic lookup:", result.answer)
+        self.assertIn("1. Ventilator", result.answer)
+        self.assertIn("2. Infusion Pump", result.answer)
+        self.assertNotIn("Equipment fault Desk", result.answer)
+        self.assertNotIn("Category:", result.answer)
+
+    def test_equipment_count_formats_total_location_and_status(self):
+        retrieval = FakeRetrieval()
+        lookup = FakeDeterministicLookup(
+            FakeLookupResult(
+                {
+                    "category": "directory",
+                    "message": "Found 2 matching row(s).",
+                    "lookup_plan": {
+                        "aggregate_intent": "count",
+                        "aggregate_result": {
+                            "type": "count",
+                            "matching_rows": 2,
+                            "counts_by_source": {"equipment_assets.csv": 2},
+                            "source_filenames": ["equipment_assets.csv"],
+                        },
+                        "row_value_search_used": True,
+                        "matched_csv_sources": ["equipment_assets.csv"],
+                    },
+                    "rows": [
+                        {
+                            "source_table": "uploaded_lookup_rows",
+                            "source_filename": "equipment_assets.csv",
+                            "row": {
+                                "equipment_type": "Ventilator",
+                                "location": "Respiratory Ward",
+                                "status": "Fault logged",
+                            },
+                        },
+                        {
+                            "source_table": "uploaded_lookup_rows",
+                            "source_filename": "equipment_assets.csv",
+                            "row": {
+                                "equipment_type": "Ventilator",
+                                "location": "Mental Health Ward",
+                                "status": "Available",
+                            },
+                        },
+                    ],
+                }
+            )
+        )
+        agent = make_agent(
+            FakeLLM([fake_ai_message("Unused LLM response")]),
+            retrieval=retrieval,
+            app_settings=settings(chat_fast_planned_execution_enabled=True, chat_fast_rag_enabled=True),
+        )
+        agent.deterministic_lookup = lookup
+
+        result = agent.answer("user", "how many ventilators do we have", session_id="session")
+
+        self.assertEqual(result.tools_used, ["postgres_deterministic_lookup"])
+        self.assertEqual(lookup.calls[0]["limit"], 100)
+        self.assertIn("Total: 2 matching row(s) in equipment_assets.csv.", result.answer)
+        self.assertIn("- Ventilator; Location: Respiratory Ward; Status: Fault logged", result.answer)
+        self.assertIn("- Ventilator; Location: Mental Health Ward; Status: Available", result.answer)
+        self.assertNotIn("Source: Postgres deterministic lookup.", result.answer)
 
     def test_multipart_lookup_and_rag_are_chosen_by_llm(self):
         retrieval = FakeRetrieval()

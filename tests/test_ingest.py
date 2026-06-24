@@ -274,6 +274,7 @@ class IncrementalIngestionTests(unittest.TestCase):
 
         self.assertEqual(result["indexed_documents"], 1)
         self.assertEqual(result["documents"][0]["key"], "raw/privacy_policy.md")
+        self.assertEqual(result["documents"][0]["uri"], "s3://bucket/raw/privacy_policy.md")
         self.assertEqual(opensearch.indexes[0]["body"]["key"], "raw/privacy_policy.md")
 
     def test_metadata_only_csv_manifest_records_are_preserved(self):
@@ -310,6 +311,7 @@ class IncrementalIngestionTests(unittest.TestCase):
         self.assertEqual(result["documents"][0]["key"], "postgres://uploaded_lookup_rows/doctor_rota.csv")
         self.assertEqual(result["documents"][0]["ingestion_status"], "metadata_only")
         self.assertEqual(result["documents"][1]["key"], "raw/privacy_policy.md")
+        self.assertEqual(result["documents"][1]["uri"], "s3://bucket/raw/privacy_policy.md")
         self.assertEqual(result["total_chunks"], 1)
 
 

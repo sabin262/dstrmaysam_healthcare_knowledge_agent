@@ -1314,7 +1314,7 @@ def render_admin_documents() -> None:
     with st.expander("Delete all indexes"):
         st.warning(
             "This clears search/vector indexes and the document manifest. "
-            "Uploaded source files and deterministic Postgres CSV rows are preserved."
+            "Uploaded source files are preserved, but deterministic Postgres CSV lookup rows are deleted."
         )
         with st.form("delete-all-indexes"):
             admin_password = st.text_input("Admin password", type="password")
@@ -1334,7 +1334,8 @@ def render_admin_documents() -> None:
                 )
                 st.success(
                     f"Deleted {result.get('deleted_chunks', 0)} indexed chunk(s) "
-                    f"from {result.get('backend', 'search')} and cleared the manifest."
+                    f"from {result.get('backend', 'search')}, deleted "
+                    f"{result.get('deleted_lookup_rows', 0)} CSV lookup row(s), and cleared the manifest."
                 )
                 st.session_state.document_cache = []
                 st.session_state.document_cache_loaded = True

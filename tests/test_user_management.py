@@ -305,12 +305,17 @@ class FakePatientLookup:
     def __init__(self):
         self.calls = []
         self.uploads = []
+        self.deleted_lookup_rows = False
 
     def ingest_uploaded_csv(self, filename, data, access_level="all_staff"):
         self.uploads.append(
             {"filename": filename, "data": data, "access_level": access_level}
         )
         return 1
+
+    def delete_uploaded_lookup_rows(self):
+        self.deleted_lookup_rows = True
+        return 5
 
     def patient_dashboard(self, **kwargs):
         self.calls.append(kwargs)
@@ -494,11 +499,13 @@ class AdminDocumentApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["deleted_chunks"], 7)
+        self.assertEqual(response.json()["deleted_lookup_rows"], 5)
         self.assertTrue(response.json()["manifest_cleared"])
         self.assertEqual(response.json()["backend"], "opensearch")
         self.assertTrue(response.json()["raw_documents_preserved"])
-        self.assertTrue(response.json()["deterministic_lookup_preserved"])
+        self.assertFalse(response.json()["deterministic_lookup_preserved"])
         self.assertTrue(self.retrieval.deleted)
+        self.assertTrue(self.patient_lookup.deleted_lookup_rows)
         self.assertEqual(self.documents.replaced_manifests[0]["documents"], [])
         self.assertEqual(self.documents.replaced_manifests[0]["opensearch_index"], "idx")
         self.assertTrue(self.agent.invalidated)
@@ -512,6 +519,7 @@ class AdminDocumentApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 401)
         self.assertFalse(self.retrieval.deleted)
+        self.assertFalse(self.patient_lookup.deleted_lookup_rows)
         self.assertEqual(self.documents.replaced_manifests, [])
 
     def test_non_admin_cannot_delete_all_indexes(self):
@@ -523,6 +531,7 @@ class AdminDocumentApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 403)
         self.assertFalse(self.retrieval.deleted)
+        self.assertFalse(self.patient_lookup.deleted_lookup_rows)
 
     def test_documents_endpoint_returns_chunk_table_fields(self):
         response = self.client.get(

@@ -116,10 +116,11 @@ class AdminDeleteIndexesRequest(BaseModel):
 
 class AdminDeleteIndexesResponse(BaseModel):
     deleted_chunks: int = 0
+    deleted_lookup_rows: int = 0
     manifest_cleared: bool = False
     backend: str
     raw_documents_preserved: bool = True
-    deterministic_lookup_preserved: bool = True
+    deterministic_lookup_preserved: bool = False
 
 
 class AdminDocumentUploadResponse(BaseModel):
