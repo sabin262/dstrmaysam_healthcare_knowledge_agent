@@ -4,6 +4,8 @@ import re
 import os
 from typing import TYPE_CHECKING, Any
 
+os.environ.setdefault("GIT_PYTHON_REFRESH", "quiet")
+
 if TYPE_CHECKING:
     from .config import AppSettings
     from .secrets import SecretProvider

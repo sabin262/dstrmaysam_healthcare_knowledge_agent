@@ -1639,13 +1639,13 @@ class KnowledgeAgent:
             "langfuse_ragas_published": bool(publish_status.get("published")),
             "langfuse_ragas_error": publish_status.get("error"),
         }
-        for _ in range(10):
+        for _ in range(120):
             try:
                 if self.history.update_message_metadata_by_trace_id(trace_id, metadata_update):
                     return
             except Exception:
                 return
-            time.sleep(0.2)
+            time.sleep(0.5)
 
     def _apply_llm_response_guardrail(
         self,

@@ -2,6 +2,7 @@ import json
 import os
 import html
 import queue
+import textwrap
 import threading
 from typing import Any
 
@@ -951,7 +952,6 @@ def render_agent_decision_tree(agent_flow: list[Any], tool_flow: list[Any]) -> N
         return
 
     branches = []
-    rendered_tool_count = 0
     for index, decision in enumerate(route_decisions, start=1):
         selected_agent = str(decision.get("selected_agent") or "SpecialistAgent")
         selected_tool = str(decision.get("tool") or "")
@@ -962,7 +962,6 @@ def render_agent_decision_tree(agent_flow: list[Any], tool_flow: list[Any]) -> N
 
         tool_cards = []
         for tool_step in tool_steps:
-            rendered_tool_count += 1
             tool = str(tool_step.get("tool") or "tool")
             kind = str(tool_step.get("kind") or "tool").replace("_", " ").title()
             helper_for = str(tool_step.get("helper_for") or "")
@@ -1045,22 +1044,21 @@ def render_agent_decision_tree(agent_flow: list[Any], tool_flow: list[Any]) -> N
             """
         )
 
-    height = min(1600, 160 + (len(branches) * 240) + (rendered_tool_count * 92) + (len(synthesis_cards) * 140))
-    components.html(
-        f"""
+    st.html(
+        textwrap.dedent(f"""
         <style>
         .decision-tree {{
             font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
             color: #e5e7eb;
-            padding: 4px 0 12px 0;
+            padding: 4px 0;
         }}
         .tree-branch {{
-            margin: 0 0 14px 0;
+            margin: 0 0 10px 0;
         }}
         .tree-node {{
             border: 1px solid #334155;
             border-radius: 8px;
-            padding: 10px 12px;
+            padding: 8px 10px;
             background: #111827;
             max-width: 860px;
         }}
@@ -1069,18 +1067,18 @@ def render_agent_decision_tree(agent_flow: list[Any], tool_flow: list[Any]) -> N
         }}
         .tree-agent {{
             border-left: 4px solid #34d399;
-            margin-top: 10px;
+            margin-top: 8px;
         }}
         .tree-tool {{
             border-left: 4px solid #fbbf24;
-            margin-top: 8px;
+            margin-top: 6px;
         }}
         .tree-synthesis {{
             border-left: 4px solid #a78bfa;
         }}
         .tree-children {{
             margin-left: 28px;
-            padding-left: 18px;
+            padding-left: 16px;
             border-left: 1px solid #334155;
         }}
         .tree-tool-list {{
@@ -1089,19 +1087,19 @@ def render_agent_decision_tree(agent_flow: list[Any], tool_flow: list[Any]) -> N
         .tree-kicker {{
             color: #93c5fd;
             font-size: 12px;
-            line-height: 16px;
-            margin-bottom: 4px;
+            line-height: 15px;
+            margin-bottom: 3px;
         }}
         .tree-name {{
             font-size: 15px;
             font-weight: 700;
-            line-height: 20px;
-            margin-bottom: 5px;
+            line-height: 18px;
+            margin-bottom: 4px;
         }}
         .tree-detail, .tree-reason, .tree-empty {{
             color: #cbd5e1;
             font-size: 12px;
-            line-height: 16px;
+            line-height: 15px;
         }}
         .tree-reason {{
             color: #94a3b8;
@@ -1112,10 +1110,51 @@ def render_agent_decision_tree(agent_flow: list[Any], tool_flow: list[Any]) -> N
             {''.join(branches)}
             {''.join(synthesis_cards)}
         </div>
-        """,
-        height=height,
-        scrolling=True,
+        """).strip(),
     )
+
+
+def ragas_detail_rows(item: dict[str, Any]) -> list[dict[str, Any]]:
+    ragas = item.get("ragas") if isinstance(item.get("ragas"), dict) else {}
+    metrics = [
+        ("Faithfulness", "ragas_faithfulness"),
+        ("Answer relevancy", "ragas_answer_relevancy"),
+        ("Context precision", "ragas_context_precision"),
+        ("Context recall", "ragas_context_recall"),
+    ]
+    return [
+        {
+            "Metric": label,
+            "Score": format_score(ragas.get(key)),
+        }
+        for label, key in metrics
+    ]
+
+
+def render_ragas_details(item: dict[str, Any]) -> None:
+    status = str(item.get("ragas_status") or "").strip()
+    provider = str(item.get("ragas_provider") or "").strip()
+    error = str(item.get("ragas_error") or "").strip()
+    ragas = item.get("ragas") if isinstance(item.get("ragas"), dict) else {}
+    has_scores = any(ragas.get(key) is not None for key in [
+        "ragas_faithfulness",
+        "ragas_answer_relevancy",
+        "ragas_context_precision",
+        "ragas_context_recall",
+    ])
+    if not status:
+        status = "completed" if has_scores else "pending"
+    st.markdown("**RAGAS evaluation**")
+    provider_text = f" | Provider: {provider}" if provider else ""
+    st.caption(f"Status: {status}{provider_text}")
+    if error:
+        st.warning(f"RAGAS detail: {error}")
+    if has_scores:
+        st.dataframe(ragas_detail_rows(item), hide_index=True, use_container_width=True)
+    elif status == "pending":
+        st.info("RAGAS scoring is pending for this query.")
+    else:
+        st.info("No RAGAS scores are available for this query.")
 
 
 def render_query_detail(item: dict[str, Any]) -> None:
@@ -1165,6 +1204,7 @@ def render_query_detail(item: dict[str, Any]) -> None:
         st.dataframe(display_supervisor_decisions, hide_index=True, use_container_width=True)
     st.markdown("**Multi-agent decision tree**")
     render_agent_decision_tree(display_agent_flow, item.get("tool_flow") or [])
+    render_ragas_details(item)
     st.markdown("**Question**")
     st.write(item.get("query", ""))
     st.markdown("**Answer**")
@@ -1372,26 +1412,15 @@ def render_admin_dashboard() -> None:
     st.subheader("Per-query details")
     query_rows = []
     for item in queries:
-        tools = item.get("tools_used") or []
         query_rows.append(
             {
                 "Time": item.get("created_at", ""),
                 "User": item.get("user_id", ""),
                 "Query": item.get("query", ""),
-                "Mode": item.get("chat_execution_mode_label") or item.get("chat_execution_mode") or "",
-                "Multi-agent flow": item.get("agent_flow_summary") or ", ".join(item.get("agents_used") or []),
                 "Model": item.get("model", ""),
-                "Tools": ", ".join(tools),
-                "Flow": item.get("tool_flow_summary") or " -> ".join(tools),
                 "Sources": item.get("source_count", 0),
                 "Tokens": item.get("total_tokens", 0),
                 "Latency ms": item.get("latency_ms", 0),
-                "Faithfulness": format_score((item.get("ragas") or {}).get("ragas_faithfulness")),
-                "Relevancy": format_score((item.get("ragas") or {}).get("ragas_answer_relevancy")),
-                "Context precision": format_score((item.get("ragas") or {}).get("ragas_context_precision")),
-                "Context recall": format_score((item.get("ragas") or {}).get("ragas_context_recall")),
-                "RAGAS status": item.get("ragas_status") or "",
-                "Trace": item.get("trace_id", ""),
                 "Guardrail": item.get("guardrail_applied", False),
             }
         )
@@ -1408,29 +1437,21 @@ def render_admin_dashboard() -> None:
                 "Time",
                 "User",
                 "Query",
-                "Mode",
-                "Multi-agent flow",
-                "Tools",
+                "Model",
                 "Sources",
                 "Tokens",
                 "Latency ms",
-                "Faithfulness",
-                "RAGAS status",
-                "Trace",
+                "Guardrail",
             ],
             column_config={
                 "Time": st.column_config.TextColumn("Time", width="medium"),
                 "User": st.column_config.TextColumn("User", width="small"),
                 "Query": st.column_config.TextColumn("Query", width="large"),
-                "Mode": st.column_config.TextColumn("Mode", width="medium"),
-                "Multi-agent flow": st.column_config.TextColumn("Multi-agent flow", width="large"),
-                "Tools": st.column_config.TextColumn("Tools", width="medium"),
+                "Model": st.column_config.TextColumn("Model", width="medium"),
                 "Sources": st.column_config.NumberColumn("Sources", width="small"),
                 "Tokens": st.column_config.NumberColumn("Tokens", width="small"),
                 "Latency ms": st.column_config.NumberColumn("Latency ms", width="small"),
-                "Faithfulness": st.column_config.TextColumn("Faithfulness", width="small"),
-                "RAGAS status": st.column_config.TextColumn("RAGAS status", width="small"),
-                "Trace": st.column_config.TextColumn("Trace", width="medium"),
+                "Guardrail": st.column_config.CheckboxColumn("Guardrail", width="small"),
             },
         )
         selected_rows = []
