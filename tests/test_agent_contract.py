@@ -342,6 +342,10 @@ class AgentContractTests(unittest.TestCase):
         self.assertEqual(result.answer, "The leave value is 20 days.")
         self.assertEqual(result.tools_used, ["table_lookup"])
         self.assertEqual(result.sources, [])
+        self.assertEqual(result.metadata["agents_used"], ["DeterministicLookupAgent", "SynthesisAgent"])
+        self.assertEqual(result.metadata["agent_flow"][0]["agent"], "SupervisorAgent")
+        self.assertEqual(result.metadata["agent_flow"][0]["selected_agent"], "DeterministicLookupAgent")
+        self.assertEqual(result.metadata["agent_flow"][1]["tool"], "table_lookup")
 
     def test_fake_llm_rag_search_returns_source_snippets(self):
         retrieval = FakeRetrieval()
@@ -396,6 +400,9 @@ class AgentContractTests(unittest.TestCase):
         )
         self.assertFalse(result.metadata["tool_flow"][0]["selected_by_agent"])
         self.assertEqual(result.metadata["tool_flow"][0]["helper_for"], "rag_search")
+        self.assertIn("RAGAgent", result.metadata["agents_used"])
+        self.assertEqual(result.metadata["supervisor_decisions"][0]["selected_agent"], "RAGAgent")
+        self.assertIn("RAGAgent", result.metadata["agent_latencies_ms"])
 
     def test_document_search_uses_catalog_candidate_keys(self):
         retrieval = FakeRetrieval()

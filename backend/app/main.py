@@ -945,6 +945,7 @@ def admin_dashboard(
     rows: list[dict[str, object]] = []
     tool_counts: dict[str, int] = {}
     tool_flow_counts: dict[str, int] = {}
+    agent_counts: dict[str, int] = {}
     user_counts: dict[str, int] = {}
     model_counts: dict[str, int] = {}
     latencies: list[int] = []
@@ -971,6 +972,32 @@ def admin_dashboard(
         performance = metadata.get("performance") if isinstance(metadata.get("performance"), dict) else {}
         tools_used = [str(tool) for tool in metadata.get("tools_used", [])]
         tool_flow = _tool_flow_from_metadata(metadata, tools_used)
+        agent_flow = metadata.get("agent_flow", []) if isinstance(metadata.get("agent_flow"), list) else []
+        agents_used = [
+            str(agent)
+            for agent in metadata.get("agents_used", [])
+            if str(agent)
+        ] if isinstance(metadata.get("agents_used"), list) else []
+        if not agents_used:
+            agents_used = [
+                str(step.get("agent"))
+                for step in agent_flow
+                if isinstance(step, dict)
+                and step.get("agent")
+                and str(step.get("agent")) != "SupervisorAgent"
+            ]
+            agents_used = list(dict.fromkeys(agents_used))
+        supervisor_decisions = (
+            metadata.get("supervisor_decisions", [])
+            if isinstance(metadata.get("supervisor_decisions"), list)
+            else []
+        )
+        agent_latencies_ms = (
+            metadata.get("agent_latencies_ms", {})
+            if isinstance(metadata.get("agent_latencies_ms"), dict)
+            else {}
+        )
+        agent_errors = metadata.get("agent_errors", []) if isinstance(metadata.get("agent_errors"), list) else []
         sources = metadata.get("sources", []) if isinstance(metadata.get("sources"), list) else []
         chat_execution_mode = str(metadata.get("chat_execution_mode") or "deterministic_agent")
         chat_execution_mode_label = str(metadata.get("chat_execution_mode_label") or "Deterministic + Agent")
@@ -1009,6 +1036,8 @@ def admin_dashboard(
             tool_name = str(step.get("tool") or "")
             if tool_name:
                 tool_flow_counts[tool_name] = tool_flow_counts.get(tool_name, 0) + 1
+        for agent in agents_used:
+            agent_counts[agent] = agent_counts.get(agent, 0) + 1
 
         rows.append(
             {
@@ -1022,6 +1051,12 @@ def admin_dashboard(
                 "tools_used": tools_used,
                 "tool_flow": tool_flow,
                 "tool_flow_summary": _tool_flow_summary(tool_flow),
+                "agent_flow": agent_flow,
+                "agents_used": agents_used,
+                "agent_flow_summary": " -> ".join(agents_used),
+                "supervisor_decisions": supervisor_decisions,
+                "agent_latencies_ms": agent_latencies_ms,
+                "agent_errors": agent_errors,
                 "chat_execution_mode": chat_execution_mode,
                 "chat_execution_mode_label": chat_execution_mode_label,
                 "source_count": len(sources),
@@ -1057,6 +1092,7 @@ def admin_dashboard(
         "guardrail_trigger_count": guardrail_count,
         "tool_counts": tool_counts,
         "tool_flow_counts": tool_flow_counts,
+        "agent_counts": agent_counts,
         "user_counts": user_counts,
         "model_counts": model_counts,
         "ragas": {

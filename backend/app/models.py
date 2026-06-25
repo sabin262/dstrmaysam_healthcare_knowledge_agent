@@ -34,7 +34,7 @@ class ChangePasswordRequest(BaseModel):
 class ChatRequest(BaseModel):
     query: str = Field(min_length=1)
     session_id: str | None = None
-    execution_mode: Literal["deterministic_agent", "agent_only"] = "deterministic_agent"
+    execution_mode: Literal["deterministic_agent", "agent_only"] = "agent_only"
 
 
 class Source(BaseModel):

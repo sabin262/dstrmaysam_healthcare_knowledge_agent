@@ -808,6 +808,473 @@ def tool_latency_rows(tool_timings: list[Any]) -> list[dict[str, Any]]:
     return rows
 
 
+def dashboard_agent_name_for_tool(tool_name: str) -> str:
+    if tool_name in {"postgres_deterministic_lookup", "table_lookup", "formulary_table_lookup", "calendar_rota_lookup"}:
+        return "DeterministicLookupAgent"
+    if tool_name in {"rag_search", "document_search"}:
+        return "RAGAgent"
+    if tool_name == "policy_search":
+        return "PolicyAgent"
+    if tool_name in {"document_catalog", "catalogue_search"}:
+        return "CatalogAgent"
+    if tool_name == "safety_guard":
+        return "SafetyAgent"
+    return "ToolAgent"
+
+
+def inferred_agent_flow(item: dict[str, Any]) -> list[dict[str, Any]]:
+    existing = item.get("agent_flow") if isinstance(item.get("agent_flow"), list) else []
+    existing_steps = [step for step in existing if isinstance(step, dict)]
+    if any(step.get("agent") == "SupervisorAgent" and step.get("decision") == "route" for step in existing_steps):
+        return existing_steps
+
+    flow: list[dict[str, Any]] = []
+    supervisor_decisions = (
+        item.get("supervisor_decisions")
+        if isinstance(item.get("supervisor_decisions"), list)
+        else []
+    )
+    for decision in supervisor_decisions:
+        if isinstance(decision, dict):
+            flow.append(dict(decision))
+
+    tool_flow = item.get("tool_flow") if isinstance(item.get("tool_flow"), list) else []
+    tools_used = [str(tool) for tool in item.get("tools_used", [])] if isinstance(item.get("tools_used"), list) else []
+    selected_tools = [
+        str(step.get("tool") or "")
+        for step in tool_flow
+        if isinstance(step, dict) and step.get("selected_by_agent") and step.get("tool")
+    ]
+    selected_tools.extend(tools_used)
+    selected_tools = list(dict.fromkeys(tool for tool in selected_tools if tool))
+
+    existing_routes = {
+        (str(step.get("selected_agent") or ""), str(step.get("tool") or ""))
+        for step in flow
+        if step.get("agent") == "SupervisorAgent" and step.get("decision") == "route"
+    }
+    for tool in selected_tools:
+        agent = dashboard_agent_name_for_tool(tool)
+        route_key = (agent, tool)
+        if route_key not in existing_routes:
+            flow.append(
+                {
+                    "agent": "SupervisorAgent",
+                    "kind": "supervisor",
+                    "decision": "route",
+                    "selected_agent": agent,
+                    "tool": tool,
+                    "query": item.get("query", ""),
+                    "reason": "reconstructed_from_tool_metadata",
+                }
+            )
+        matching_tool = next(
+            (
+                step
+                for step in tool_flow
+                if isinstance(step, dict) and str(step.get("tool") or "") == tool
+            ),
+            {},
+        )
+        flow.append(
+            {
+                "agent": agent,
+                "kind": "specialist",
+                "tool": tool,
+                "query": matching_tool.get("query") or item.get("query", ""),
+                "status": "reconstructed",
+                "latency_ms": int(matching_tool.get("latency_ms") or 0) if isinstance(matching_tool, dict) else 0,
+                "source_count": int(matching_tool.get("returned_hits") or 0) if isinstance(matching_tool, dict) else 0,
+            }
+        )
+
+    agents_used = [str(agent) for agent in item.get("agents_used", [])] if isinstance(item.get("agents_used"), list) else []
+    if item.get("answer") and ("SynthesisAgent" in agents_used or selected_tools):
+        flow.append(
+            {
+                "agent": "SynthesisAgent",
+                "kind": "synthesis",
+                "status": "answered",
+                "latency_ms": int((item.get("agent_latencies_ms") or {}).get("SynthesisAgent") or 0)
+                if isinstance(item.get("agent_latencies_ms"), dict)
+                else 0,
+            }
+        )
+
+    return flow or existing_steps
+
+
+def _related_tool_steps(tool_flow: list[Any], selected_tool: str) -> list[dict[str, Any]]:
+    related = []
+    seen: set[str] = set()
+    for step in tool_flow:
+        if not isinstance(step, dict):
+            continue
+        tool = str(step.get("tool") or "")
+        helper_for = str(step.get("helper_for") or "")
+        if tool != selected_tool and helper_for != selected_tool:
+            continue
+        key = json.dumps(step, sort_keys=True, default=str)
+        if key in seen:
+            continue
+        seen.add(key)
+        related.append(step)
+    if selected_tool and not any(str(step.get("tool") or "") == selected_tool for step in related):
+        related.append({"tool": selected_tool, "kind": "agent_tool", "selected_by_agent": True})
+    return related
+
+
+def _matching_specialist_step(agent_flow: list[Any], selected_agent: str, selected_tool: str) -> dict[str, Any]:
+    for step in agent_flow:
+        if not isinstance(step, dict):
+            continue
+        if step.get("kind") != "specialist":
+            continue
+        if selected_agent and str(step.get("agent") or "") != selected_agent:
+            continue
+        if selected_tool and str(step.get("tool") or "") != selected_tool:
+            continue
+        return step
+    return {}
+
+
+def render_agent_decision_tree(agent_flow: list[Any], tool_flow: list[Any]) -> None:
+    flow_steps = [step for step in agent_flow if isinstance(step, dict)]
+    route_decisions = [
+        step
+        for step in flow_steps
+        if step.get("agent") == "SupervisorAgent" and step.get("decision") == "route"
+    ]
+    synthesis_steps = [step for step in flow_steps if step.get("agent") == "SynthesisAgent"]
+    if not route_decisions and not synthesis_steps:
+        st.caption("No supervisor decision tree captured for this query.")
+        return
+
+    branches = []
+    rendered_tool_count = 0
+    for index, decision in enumerate(route_decisions, start=1):
+        selected_agent = str(decision.get("selected_agent") or "SpecialistAgent")
+        selected_tool = str(decision.get("tool") or "")
+        specialist = _matching_specialist_step(flow_steps, selected_agent, selected_tool)
+        tool_steps = _related_tool_steps(tool_flow, selected_tool)
+        if not tool_steps and selected_tool:
+            tool_steps = [{"tool": selected_tool, "kind": "agent_tool", "selected_by_agent": True}]
+
+        tool_cards = []
+        for tool_step in tool_steps:
+            rendered_tool_count += 1
+            tool = str(tool_step.get("tool") or "tool")
+            kind = str(tool_step.get("kind") or "tool").replace("_", " ").title()
+            helper_for = str(tool_step.get("helper_for") or "")
+            selected_by_agent = bool(tool_step.get("selected_by_agent"))
+            latency = int(tool_step.get("latency_ms") or 0)
+            returned_hits = tool_step.get("returned_hits")
+            candidate_count = tool_step.get("candidate_count")
+            detail_parts = []
+            if helper_for:
+                detail_parts.append(f"helper for {helper_for}")
+            elif selected_by_agent:
+                detail_parts.append("selected by agent")
+            if candidate_count not in (None, ""):
+                detail_parts.append(f"candidates {candidate_count}")
+            if returned_hits not in (None, ""):
+                detail_parts.append(f"hits {returned_hits}")
+            if latency:
+                detail_parts.append(f"{latency} ms")
+            tool_cards.append(
+                f"""
+                <div class="tree-node tree-tool">
+                    <div class="tree-kicker">Tool</div>
+                    <div class="tree-name">{html.escape(tool)}</div>
+                    <div class="tree-detail">{html.escape(' | '.join(detail_parts) or kind)}</div>
+                </div>
+                """
+            )
+
+        specialist_status = str(specialist.get("status") or "selected")
+        specialist_latency = int(specialist.get("latency_ms") or 0)
+        source_count = specialist.get("source_count")
+        specialist_detail = [specialist_status]
+        if selected_tool:
+            specialist_detail.append(f"tool {selected_tool}")
+        if source_count not in (None, ""):
+            specialist_detail.append(f"sources {source_count}")
+        if specialist_latency:
+            specialist_detail.append(f"{specialist_latency} ms")
+        branches.append(
+            f"""
+            <div class="tree-branch">
+                <div class="tree-node tree-supervisor">
+                    <div class="tree-kicker">Step {index} | Supervisor decision</div>
+                    <div class="tree-name">SupervisorAgent</div>
+                    <div class="tree-detail">
+                        routes to {html.escape(selected_agent)}
+                        {html.escape(' using ' + selected_tool if selected_tool else '')}
+                    </div>
+                    <div class="tree-reason">{html.escape(str(decision.get("reason") or ""))}</div>
+                </div>
+                <div class="tree-children">
+                    <div class="tree-node tree-agent">
+                        <div class="tree-kicker">Chosen agent</div>
+                        <div class="tree-name">{html.escape(selected_agent)}</div>
+                        <div class="tree-detail">{html.escape(' | '.join(specialist_detail))}</div>
+                    </div>
+                    <div class="tree-children tree-tool-list">
+                        {''.join(tool_cards) or '<div class="tree-empty">No tool usage captured.</div>'}
+                    </div>
+                </div>
+            </div>
+            """
+        )
+
+    synthesis_cards = []
+    for synthesis in synthesis_steps:
+        latency = int(synthesis.get("latency_ms") or 0)
+        detail = str(synthesis.get("status") or "answered")
+        if latency:
+            detail = f"{detail} | {latency} ms"
+        synthesis_cards.append(
+            f"""
+            <div class="tree-branch">
+                <div class="tree-node tree-synthesis">
+                    <div class="tree-kicker">Final response</div>
+                    <div class="tree-name">SynthesisAgent</div>
+                    <div class="tree-detail">{html.escape(detail)}</div>
+                </div>
+            </div>
+            """
+        )
+
+    height = min(1600, 160 + (len(branches) * 240) + (rendered_tool_count * 92) + (len(synthesis_cards) * 140))
+    components.html(
+        f"""
+        <style>
+        .decision-tree {{
+            font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            color: #e5e7eb;
+            padding: 4px 0 12px 0;
+        }}
+        .tree-branch {{
+            margin: 0 0 14px 0;
+        }}
+        .tree-node {{
+            border: 1px solid #334155;
+            border-radius: 8px;
+            padding: 10px 12px;
+            background: #111827;
+            max-width: 860px;
+        }}
+        .tree-supervisor {{
+            border-left: 4px solid #60a5fa;
+        }}
+        .tree-agent {{
+            border-left: 4px solid #34d399;
+            margin-top: 10px;
+        }}
+        .tree-tool {{
+            border-left: 4px solid #fbbf24;
+            margin-top: 8px;
+        }}
+        .tree-synthesis {{
+            border-left: 4px solid #a78bfa;
+        }}
+        .tree-children {{
+            margin-left: 28px;
+            padding-left: 18px;
+            border-left: 1px solid #334155;
+        }}
+        .tree-tool-list {{
+            margin-top: 2px;
+        }}
+        .tree-kicker {{
+            color: #93c5fd;
+            font-size: 12px;
+            line-height: 16px;
+            margin-bottom: 4px;
+        }}
+        .tree-name {{
+            font-size: 15px;
+            font-weight: 700;
+            line-height: 20px;
+            margin-bottom: 5px;
+        }}
+        .tree-detail, .tree-reason, .tree-empty {{
+            color: #cbd5e1;
+            font-size: 12px;
+            line-height: 16px;
+        }}
+        .tree-reason {{
+            color: #94a3b8;
+            margin-top: 5px;
+        }}
+        </style>
+        <div class="decision-tree">
+            {''.join(branches)}
+            {''.join(synthesis_cards)}
+        </div>
+        """,
+        height=height,
+        scrolling=True,
+    )
+
+
+def render_query_detail(item: dict[str, Any]) -> None:
+    st.markdown(
+        """
+        <style>
+        div[data-testid="stDialog"] div[role="dialog"] {
+            width: 60vw;
+            max-width: 60vw;
+        }
+        @media (max-width: 1100px) {
+            div[data-testid="stDialog"] div[role="dialog"] {
+                width: 92vw;
+                max-width: 92vw;
+            }
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    display_agent_flow = inferred_agent_flow(item)
+    display_supervisor_decisions = (
+        item.get("supervisor_decisions")
+        if isinstance(item.get("supervisor_decisions"), list) and item.get("supervisor_decisions")
+        else [
+            step
+            for step in display_agent_flow
+            if isinstance(step, dict) and step.get("agent") == "SupervisorAgent"
+        ]
+    )
+    detail_columns = st.columns(5)
+    detail_columns[0].metric("Latency", f"{item.get('latency_ms', 0)} ms")
+    detail_columns[1].metric("Sources", item.get("source_count", 0))
+    detail_columns[2].metric("Input tokens", item.get("input_tokens") or 0)
+    detail_columns[3].metric("Output tokens", item.get("output_tokens") or 0)
+    detail_columns[4].metric("Total tokens", item.get("total_tokens") or 0)
+    st.caption(f"Trace ID: {item.get('trace_id') or 'unavailable'}")
+    st.caption(f"Session ID: {item.get('session_id')}")
+    st.caption(
+        "Execution mode: "
+        f"{item.get('chat_execution_mode_label') or item.get('chat_execution_mode') or 'Deterministic + Agent'}"
+    )
+    st.caption(f"Agent mode: {item.get('agent_mode') or 'unknown'}")
+    st.caption(f"Agents: {item.get('agent_flow_summary') or ', '.join(item.get('agents_used') or []) or 'unavailable'}")
+    if display_supervisor_decisions:
+        st.markdown("**Supervisor decisions**")
+        st.dataframe(display_supervisor_decisions, hide_index=True, use_container_width=True)
+    st.markdown("**Multi-agent decision tree**")
+    render_agent_decision_tree(display_agent_flow, item.get("tool_flow") or [])
+    st.markdown("**Question**")
+    st.write(item.get("query", ""))
+    st.markdown("**Answer**")
+    st.write(item.get("answer", ""))
+    latency_breakdown = item.get("latency_breakdown") if isinstance(item.get("latency_breakdown"), dict) else {}
+    if latency_breakdown:
+        with st.expander("Timing details", expanded=False):
+            top_level = latency_breakdown.get("top_level") if isinstance(latency_breakdown.get("top_level"), dict) else {}
+            agent_detail = latency_breakdown.get("agent_detail") if isinstance(latency_breakdown.get("agent_detail"), dict) else {}
+            top_level_rows = latency_rows(
+                top_level,
+                {
+                    "agent_execution_ms": "Agent execution",
+                    "history_load_ms": "History load",
+                    "trace_setup_ms": "Langfuse trace setup",
+                    "prompt_load_ms": "Prompt load",
+                    "initial_safety_ms": "Initial safety",
+                    "response_guardrail_ms": "Response guardrail",
+                    "final_safety_ms": "Final safety",
+                    "history_save_ms": "History save",
+                    "unattributed_ms": "Other",
+                },
+            )
+            timing_agent_rows = latency_rows(
+                agent_detail,
+                {
+                    "llm_total_ms": "LLM calls",
+                    "llm_tool_choice_ms": "LLM tool choice",
+                    "llm_final_ms": "LLM final answer",
+                    "llm_direct_answer_ms": "LLM direct answer",
+                    "llm_setup_ms": "LLM setup",
+                    "fast_llm_setup_ms": "Fast LLM setup",
+                    "langfuse_callbacks_ms": "Langfuse callbacks",
+                    "catalog_ms": "Document catalog",
+                    "index_check_ms": "OpenSearch index check",
+                    "retrieval_search_ms": "Retrieval search",
+                    "embedding_ms": "Embedding",
+                    "opensearch_ms": "OpenSearch",
+                    "neighbor_ms": "Neighbor chunks",
+                    "access_filter_ms": "Access filtering",
+                },
+            )
+            timing_columns = st.columns(2)
+            with timing_columns[0]:
+                st.markdown("**Latency breakdown**")
+                if top_level_rows:
+                    st.dataframe(top_level_rows, hide_index=True, use_container_width=True)
+                else:
+                    st.caption("No phase timings captured.")
+            with timing_columns[1]:
+                st.markdown("**Agent detail**")
+                if timing_agent_rows:
+                    st.dataframe(timing_agent_rows, hide_index=True, use_container_width=True)
+                else:
+                    st.caption("No agent detail timings captured.")
+            tool_rows = tool_latency_rows(latency_breakdown.get("tool_timings") or [])
+            if tool_rows:
+                st.markdown("**Tool timings**")
+                st.dataframe(tool_rows, hide_index=True, use_container_width=True)
+            section_rows = latency_section_rows(
+                latency_breakdown.get("sections")
+                if isinstance(latency_breakdown.get("sections"), dict)
+                else {}
+            )
+            if section_rows:
+                st.markdown("**Detailed latency sections**")
+                st.dataframe(section_rows, hide_index=True, use_container_width=True)
+            raw_rows = raw_latency_rows(
+                latency_breakdown.get("raw_timing_metrics")
+                if isinstance(latency_breakdown.get("raw_timing_metrics"), dict)
+                else {}
+            )
+            if raw_rows:
+                st.markdown("**All captured timing metrics**")
+                st.dataframe(raw_rows, hide_index=True, use_container_width=True)
+            total_rows = counter_rows(
+                latency_breakdown.get("tool_timing_totals")
+                if isinstance(latency_breakdown.get("tool_timing_totals"), dict)
+                else {}
+            )
+            if total_rows:
+                st.markdown("**Tool totals and hit counts**")
+                st.dataframe(total_rows, hide_index=True, use_container_width=True)
+    with st.expander("Tools, sources, and raw metadata", expanded=False):
+        st.json(
+            {
+                "tools_used": item.get("tools_used", []),
+                "tool_flow": item.get("tool_flow", []),
+                "agents_used": item.get("agents_used", []),
+                "agent_flow": item.get("agent_flow", []),
+                "display_agent_flow": display_agent_flow,
+                "supervisor_decisions": item.get("supervisor_decisions", []),
+                "agent_latencies_ms": item.get("agent_latencies_ms", {}),
+                "agent_errors": item.get("agent_errors", []),
+                "source_document_keys": item.get("source_document_keys", []),
+                "latency_breakdown": item.get("latency_breakdown", {}),
+                "chat_execution_mode": item.get("chat_execution_mode"),
+                "chat_execution_mode_label": item.get("chat_execution_mode_label"),
+                "agent_mode": item.get("agent_mode"),
+                "ragas": item.get("ragas", {}),
+                "ragas_status": item.get("ragas_status"),
+                "ragas_provider": item.get("ragas_provider"),
+                "langfuse_ragas_published": item.get("langfuse_ragas_published"),
+                "guardrail_applied": item.get("guardrail_applied"),
+                "guardrail_reason": item.get("guardrail_reason"),
+                "safety": item.get("safety", {}),
+            }
+        )
+
+
 def render_admin_dashboard() -> None:
     render_page_title("Dashboard")
 
@@ -871,8 +1338,9 @@ def render_admin_dashboard() -> None:
     metric_columns[7].metric("Guardrails", summary.get("guardrail_trigger_count", 0))
 
     st.divider()
-    chart_columns = st.columns(3)
+    chart_columns = st.columns(4)
     tool_rows = count_rows(summary.get("tool_flow_counts") or summary.get("tool_counts") or {}, "Tool")
+    agent_summary_rows = count_rows(summary.get("agent_counts") or {}, "Agent")
     user_rows = count_rows(summary.get("user_counts") or {}, "User")
     model_rows = count_rows(summary.get("model_counts") or {}, "Model")
     with chart_columns[0]:
@@ -882,12 +1350,18 @@ def render_admin_dashboard() -> None:
         else:
             st.caption("No tool calls yet")
     with chart_columns[1]:
+        st.subheader("Agents")
+        if agent_summary_rows:
+            st.bar_chart(agent_summary_rows, x="Agent", y="Count")
+        else:
+            st.caption("No agent flow yet")
+    with chart_columns[2]:
         st.subheader("Users")
         if user_rows:
             st.bar_chart(user_rows, x="User", y="Count")
         else:
             st.caption("No user activity yet")
-    with chart_columns[2]:
+    with chart_columns[3]:
         st.subheader("Models")
         if model_rows:
             st.bar_chart(model_rows, x="Model", y="Count")
@@ -905,6 +1379,7 @@ def render_admin_dashboard() -> None:
                 "User": item.get("user_id", ""),
                 "Query": item.get("query", ""),
                 "Mode": item.get("chat_execution_mode_label") or item.get("chat_execution_mode") or "",
+                "Multi-agent flow": item.get("agent_flow_summary") or ", ".join(item.get("agents_used") or []),
                 "Model": item.get("model", ""),
                 "Tools": ", ".join(tools),
                 "Flow": item.get("tool_flow_summary") or " -> ".join(tools),
@@ -921,127 +1396,64 @@ def render_admin_dashboard() -> None:
             }
         )
     if query_rows:
-        st.dataframe(query_rows, hide_index=True, use_container_width=True)
+        st.caption("Select a row to open query details.")
+        table_event = st.dataframe(
+            query_rows,
+            hide_index=True,
+            use_container_width=True,
+            height=430,
+            on_select="rerun",
+            selection_mode="single-row",
+            column_order=[
+                "Time",
+                "User",
+                "Query",
+                "Mode",
+                "Multi-agent flow",
+                "Tools",
+                "Sources",
+                "Tokens",
+                "Latency ms",
+                "Faithfulness",
+                "RAGAS status",
+                "Trace",
+            ],
+            column_config={
+                "Time": st.column_config.TextColumn("Time", width="medium"),
+                "User": st.column_config.TextColumn("User", width="small"),
+                "Query": st.column_config.TextColumn("Query", width="large"),
+                "Mode": st.column_config.TextColumn("Mode", width="medium"),
+                "Multi-agent flow": st.column_config.TextColumn("Multi-agent flow", width="large"),
+                "Tools": st.column_config.TextColumn("Tools", width="medium"),
+                "Sources": st.column_config.NumberColumn("Sources", width="small"),
+                "Tokens": st.column_config.NumberColumn("Tokens", width="small"),
+                "Latency ms": st.column_config.NumberColumn("Latency ms", width="small"),
+                "Faithfulness": st.column_config.TextColumn("Faithfulness", width="small"),
+                "RAGAS status": st.column_config.TextColumn("RAGAS status", width="small"),
+                "Trace": st.column_config.TextColumn("Trace", width="medium"),
+            },
+        )
+        selected_rows = []
+        try:
+            selected_rows = list(table_event.selection.rows)
+        except Exception:
+            selected_rows = []
+        if selected_rows:
+            selected_index = int(selected_rows[0])
+            if 0 <= selected_index < len(queries):
+                selected_item = queries[selected_index]
+                if hasattr(st, "dialog"):
+
+                    @st.dialog("Query details", width="large")
+                    def query_detail_dialog() -> None:
+                        render_query_detail(selected_item)
+
+                    query_detail_dialog()
+                else:
+                    st.markdown("**Selected query details**")
+                    render_query_detail(selected_item)
     else:
         st.info("No chat queries found yet.")
-
-    for index, item in enumerate(queries[:25]):
-        label = f"{item.get('user_id', 'user')} - {str(item.get('query', ''))[:80]}"
-        with st.expander(label):
-            detail_columns = st.columns(5)
-            detail_columns[0].metric("Latency", f"{item.get('latency_ms', 0)} ms")
-            detail_columns[1].metric("Sources", item.get("source_count", 0))
-            detail_columns[2].metric("Input tokens", item.get("input_tokens") or 0)
-            detail_columns[3].metric("Output tokens", item.get("output_tokens") or 0)
-            detail_columns[4].metric("Total tokens", item.get("total_tokens") or 0)
-            st.caption(f"Trace ID: {item.get('trace_id') or 'unavailable'}")
-            st.caption(f"Session ID: {item.get('session_id')}")
-            st.caption(
-                "Execution mode: "
-                f"{item.get('chat_execution_mode_label') or item.get('chat_execution_mode') or 'Deterministic + Agent'}"
-            )
-            st.caption(f"Agent mode: {item.get('agent_mode') or 'unknown'}")
-            st.markdown("**Question**")
-            st.write(item.get("query", ""))
-            st.markdown("**Answer**")
-            st.write(item.get("answer", ""))
-            latency_breakdown = item.get("latency_breakdown") if isinstance(item.get("latency_breakdown"), dict) else {}
-            if latency_breakdown:
-                top_level = latency_breakdown.get("top_level") if isinstance(latency_breakdown.get("top_level"), dict) else {}
-                agent_detail = latency_breakdown.get("agent_detail") if isinstance(latency_breakdown.get("agent_detail"), dict) else {}
-                top_level_rows = latency_rows(
-                    top_level,
-                    {
-                        "agent_execution_ms": "Agent execution",
-                        "history_load_ms": "History load",
-                        "trace_setup_ms": "Langfuse trace setup",
-                        "prompt_load_ms": "Prompt load",
-                        "initial_safety_ms": "Initial safety",
-                        "response_guardrail_ms": "Response guardrail",
-                        "final_safety_ms": "Final safety",
-                        "history_save_ms": "History save",
-                        "unattributed_ms": "Other",
-                    },
-                )
-                agent_rows = latency_rows(
-                    agent_detail,
-                    {
-                        "llm_total_ms": "LLM calls",
-                        "llm_tool_choice_ms": "LLM tool choice",
-                        "llm_final_ms": "LLM final answer",
-                        "llm_direct_answer_ms": "LLM direct answer",
-                        "llm_setup_ms": "LLM setup",
-                        "fast_llm_setup_ms": "Fast LLM setup",
-                        "langfuse_callbacks_ms": "Langfuse callbacks",
-                        "catalog_ms": "Document catalog",
-                        "index_check_ms": "OpenSearch index check",
-                        "retrieval_search_ms": "Retrieval search",
-                        "embedding_ms": "Embedding",
-                        "opensearch_ms": "OpenSearch",
-                        "neighbor_ms": "Neighbor chunks",
-                        "access_filter_ms": "Access filtering",
-                    },
-                )
-                timing_columns = st.columns(2)
-                with timing_columns[0]:
-                    st.markdown("**Latency breakdown**")
-                    if top_level_rows:
-                        st.dataframe(top_level_rows, hide_index=True, use_container_width=True)
-                    else:
-                        st.caption("No phase timings captured.")
-                with timing_columns[1]:
-                    st.markdown("**Agent detail**")
-                    if agent_rows:
-                        st.dataframe(agent_rows, hide_index=True, use_container_width=True)
-                    else:
-                        st.caption("No agent detail timings captured.")
-                tool_rows = tool_latency_rows(latency_breakdown.get("tool_timings") or [])
-                if tool_rows:
-                    st.markdown("**Tool timings**")
-                    st.dataframe(tool_rows, hide_index=True, use_container_width=True)
-                section_rows = latency_section_rows(
-                    latency_breakdown.get("sections")
-                    if isinstance(latency_breakdown.get("sections"), dict)
-                    else {}
-                )
-                if section_rows:
-                    st.markdown("**Detailed latency sections**")
-                    st.dataframe(section_rows, hide_index=True, use_container_width=True)
-                raw_rows = raw_latency_rows(
-                    latency_breakdown.get("raw_timing_metrics")
-                    if isinstance(latency_breakdown.get("raw_timing_metrics"), dict)
-                    else {}
-                )
-                if raw_rows:
-                    st.markdown("**All captured timing metrics**")
-                    st.dataframe(raw_rows, hide_index=True, use_container_width=True)
-                total_rows = counter_rows(
-                    latency_breakdown.get("tool_timing_totals")
-                    if isinstance(latency_breakdown.get("tool_timing_totals"), dict)
-                    else {}
-                )
-                if total_rows:
-                    st.markdown("**Tool totals and hit counts**")
-                    st.dataframe(total_rows, hide_index=True, use_container_width=True)
-            st.markdown("**Tools and source keys**")
-            st.json(
-                {
-                    "tools_used": item.get("tools_used", []),
-                    "tool_flow": item.get("tool_flow", []),
-                    "source_document_keys": item.get("source_document_keys", []),
-                    "latency_breakdown": item.get("latency_breakdown", {}),
-                    "chat_execution_mode": item.get("chat_execution_mode"),
-                    "chat_execution_mode_label": item.get("chat_execution_mode_label"),
-                    "agent_mode": item.get("agent_mode"),
-                    "ragas": item.get("ragas", {}),
-                    "ragas_status": item.get("ragas_status"),
-                    "ragas_provider": item.get("ragas_provider"),
-                    "langfuse_ragas_published": item.get("langfuse_ragas_published"),
-                    "guardrail_applied": item.get("guardrail_applied"),
-                    "guardrail_reason": item.get("guardrail_reason"),
-                    "safety": item.get("safety", {}),
-                }
-            )
 
 
 def patient_detail_table_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1372,8 +1784,8 @@ def format_score(value: Any) -> str:
 
 
 def current_chat_execution_mode() -> str:
-    mode = str(st.session_state.get("chat_execution_mode") or "deterministic_agent")
-    return mode if mode in CHAT_EXECUTION_MODE_LABELS else "deterministic_agent"
+    mode = str(st.session_state.get("chat_execution_mode") or "agent_only")
+    return mode if mode in CHAT_EXECUTION_MODE_LABELS else "agent_only"
 
 
 def append_chat_mode_notice() -> None:
@@ -1560,7 +1972,7 @@ def render_chat_page() -> None:
     inject_chat_layout_css()
     st.markdown('<span class="hka-chat-page-marker"></span>', unsafe_allow_html=True)
     render_page_title("Chat")
-    st.session_state.setdefault("chat_execution_mode", "deterministic_agent")
+    st.session_state.setdefault("chat_execution_mode", "agent_only")
     pending_query = st.session_state.pop("pending_chat_query", None)
     with st.container(height=620, border=True):
         if pending_query:

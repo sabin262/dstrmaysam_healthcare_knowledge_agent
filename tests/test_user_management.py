@@ -408,7 +408,7 @@ class AdminDocumentApiTests(unittest.TestCase):
         token = self.auth.login(username, password).access_token
         return {"Authorization": f"Bearer {token}"}
 
-    def test_chat_defaults_to_deterministic_agent_execution_mode(self):
+    def test_chat_defaults_to_agent_only_execution_mode(self):
         response = self.client.post(
             "/chat",
             headers=self.headers_for("staff", "staffpass1"),
@@ -416,7 +416,7 @@ class AdminDocumentApiTests(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(self.agent.answer_calls[-1]["execution_mode"], "deterministic_agent")
+        self.assertEqual(self.agent.answer_calls[-1]["execution_mode"], "agent_only")
 
     def test_chat_accepts_agent_only_execution_mode(self):
         response = self.client.post(
@@ -611,6 +611,43 @@ class AdminDocumentApiTests(unittest.TestCase):
                     "model": "gpt-4.1-mini",
                     "chat_execution_mode": "agent_only",
                     "chat_execution_mode_label": "Agent only",
+                    "agent_flow": [
+                        {
+                            "agent": "SupervisorAgent",
+                            "kind": "supervisor",
+                            "decision": "route",
+                            "selected_agent": "RAGAgent",
+                            "tool": "rag_search",
+                            "query": "What is the leave policy?",
+                        },
+                        {
+                            "agent": "RAGAgent",
+                            "kind": "specialist",
+                            "tool": "rag_search",
+                            "query": "What is the leave policy?",
+                            "status": "ok",
+                            "latency_ms": 238,
+                        },
+                        {
+                            "agent": "SynthesisAgent",
+                            "kind": "synthesis",
+                            "status": "answered",
+                            "latency_ms": 700,
+                        },
+                    ],
+                    "agents_used": ["RAGAgent", "SynthesisAgent"],
+                    "supervisor_decisions": [
+                        {
+                            "agent": "SupervisorAgent",
+                            "kind": "supervisor",
+                            "decision": "route",
+                            "selected_agent": "RAGAgent",
+                            "tool": "rag_search",
+                            "query": "What is the leave policy?",
+                        }
+                    ],
+                    "agent_latencies_ms": {"RAGAgent": 238, "SynthesisAgent": 700},
+                    "agent_errors": [],
                     "sources": [{"uri": "s3://bucket/raw/policy.md"}],
                     "source_document_keys": ["raw/policy.md"],
                     "catalog_guidance": [
@@ -667,6 +704,8 @@ class AdminDocumentApiTests(unittest.TestCase):
         self.assertEqual(payload["summary"]["tool_counts"]["rag_search"], 1)
         self.assertEqual(payload["summary"]["tool_flow_counts"]["document_catalog"], 1)
         self.assertEqual(payload["summary"]["tool_flow_counts"]["rag_search"], 1)
+        self.assertEqual(payload["summary"]["agent_counts"]["RAGAgent"], 1)
+        self.assertEqual(payload["summary"]["agent_counts"]["SynthesisAgent"], 1)
         self.assertEqual(payload["summary"]["model_counts"]["gpt-4.1-mini"], 1)
         self.assertEqual(payload["queries"][0]["user_id"], "staff")
         self.assertEqual(payload["queries"][0]["trace_id"], "trace-123")
@@ -674,6 +713,12 @@ class AdminDocumentApiTests(unittest.TestCase):
         self.assertEqual(payload["queries"][0]["chat_execution_mode_label"], "Agent only")
         self.assertEqual(payload["queries"][0]["total_tokens"], 16)
         self.assertEqual(payload["queries"][0]["tool_flow_summary"], "document_catalog -> rag_search")
+        self.assertEqual(payload["queries"][0]["agent_flow_summary"], "RAGAgent -> SynthesisAgent")
+        self.assertEqual(payload["queries"][0]["agents_used"], ["RAGAgent", "SynthesisAgent"])
+        self.assertEqual(payload["queries"][0]["agent_flow"][1]["agent"], "RAGAgent")
+        self.assertEqual(payload["queries"][0]["supervisor_decisions"][0]["selected_agent"], "RAGAgent")
+        self.assertEqual(payload["queries"][0]["agent_latencies_ms"]["RAGAgent"], 238)
+        self.assertEqual(payload["queries"][0]["agent_errors"], [])
         self.assertEqual(payload["queries"][0]["tool_flow"][0]["tool"], "document_catalog")
         self.assertEqual(payload["queries"][0]["tool_flow"][0]["helper_for"], "rag_search")
         self.assertEqual(payload["queries"][0]["latency_breakdown"]["total_ms"], 1200)

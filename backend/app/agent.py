@@ -950,6 +950,117 @@ def _tool_flow_from_execution(
     return flow
 
 
+def _agent_name_for_tool(tool_name: str) -> str:
+    if tool_name in {"postgres_deterministic_lookup", "table_lookup", "formulary_table_lookup", "calendar_rota_lookup"}:
+        return "DeterministicLookupAgent"
+    if tool_name in {"rag_search", "document_search"}:
+        return "RAGAgent"
+    if tool_name == "policy_search":
+        return "PolicyAgent"
+    if tool_name in {"document_catalog", "catalogue_search"}:
+        return "CatalogAgent"
+    if tool_name == "safety_guard":
+        return "SafetyAgent"
+    return "ToolAgent"
+
+
+def _unique_ordered(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    unique: list[str] = []
+    for value in values:
+        if value and value not in seen:
+            seen.add(value)
+            unique.append(value)
+    return unique
+
+
+def _agent_metadata_from_flow(agent_flow: list[dict[str, Any]]) -> dict[str, Any]:
+    agents = _unique_ordered(
+        [
+            str(step.get("agent") or "")
+            for step in agent_flow
+            if isinstance(step, dict) and str(step.get("agent") or "") != "SupervisorAgent"
+        ]
+    )
+    supervisor_decisions = [
+        dict(step)
+        for step in agent_flow
+        if isinstance(step, dict) and step.get("agent") == "SupervisorAgent"
+    ]
+    latencies: dict[str, int] = {}
+    errors: list[dict[str, Any]] = []
+    for step in agent_flow:
+        if not isinstance(step, dict):
+            continue
+        agent = str(step.get("agent") or "")
+        if not agent:
+            continue
+        try:
+            latency_ms = int(step.get("latency_ms") or 0)
+        except Exception:
+            latency_ms = 0
+        if latency_ms:
+            latencies[agent] = latencies.get(agent, 0) + latency_ms
+        error = step.get("error")
+        if error:
+            errors.append({"agent": agent, "error": str(error), "tool": step.get("tool")})
+    return {
+        "agent_flow": agent_flow,
+        "agents_used": agents,
+        "supervisor_decisions": supervisor_decisions,
+        "agent_latencies_ms": latencies,
+        "agent_errors": errors,
+    }
+
+
+def _agent_flow_for_tool(
+    *,
+    tool_name: str,
+    query: str,
+    reason: str,
+    latency_ms: int = 0,
+    status: str = "ok",
+) -> list[dict[str, Any]]:
+    agent_name = _agent_name_for_tool(tool_name)
+    return [
+        {
+            "agent": "SupervisorAgent",
+            "kind": "supervisor",
+            "decision": "route",
+            "selected_agent": agent_name,
+            "tool": tool_name,
+            "query": query,
+            "reason": reason,
+        },
+        {
+            "agent": agent_name,
+            "kind": "specialist",
+            "tool": tool_name,
+            "query": query,
+            "status": status,
+            "latency_ms": latency_ms,
+        },
+    ]
+
+
+def _agent_flow_for_synthesis(*, reason: str, latency_ms: int = 0) -> list[dict[str, Any]]:
+    return [
+        {
+            "agent": "SupervisorAgent",
+            "kind": "supervisor",
+            "decision": "synthesize",
+            "selected_agent": "SynthesisAgent",
+            "reason": reason,
+        },
+        {
+            "agent": "SynthesisAgent",
+            "kind": "synthesis",
+            "status": "answered",
+            "latency_ms": latency_ms,
+        },
+    ]
+
+
 def _make_system_message(content: str) -> Any:
     try:
         from langchain_core.messages import SystemMessage
@@ -999,6 +1110,20 @@ class GraphAgentResult:
     tool_context: str
     catalog_guidance: list[dict[str, Any]] = field(default_factory=list)
     performance: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class SpecialistAgentResult:
+    agent_name: str
+    status: str
+    answer_fragment: str
+    tool_context: str
+    sources: list[dict[str, Any]] = field(default_factory=list)
+    tools_used: list[str] = field(default_factory=list)
+    tool_flow: list[dict[str, Any]] = field(default_factory=list)
+    catalog_guidance: list[dict[str, Any]] = field(default_factory=list)
+    performance: dict[str, Any] = field(default_factory=dict)
+    errors: list[str] = field(default_factory=list)
 
 
 class KnowledgeAgent:
@@ -1182,6 +1307,16 @@ class KnowledgeAgent:
                 catalog_guidance = graph_result.catalog_guidance
                 tool_flow = _tool_flow_from_execution(tools_used, catalog_guidance)
                 performance.update(graph_result.performance)
+                agent_flow = list(performance.get("agent_flow") or [])
+                agent_metadata = _agent_metadata_from_flow(agent_flow)
+                agents_used = list(performance.get("agents_used") or agent_metadata["agents_used"])
+                supervisor_decisions = list(
+                    performance.get("supervisor_decisions") or agent_metadata["supervisor_decisions"]
+                )
+                agent_latencies_ms = dict(
+                    performance.get("agent_latencies_ms") or agent_metadata["agent_latencies_ms"]
+                )
+                agent_errors = list(performance.get("agent_errors") or agent_metadata["agent_errors"])
                 answer = self._apply_llm_response_guardrail(
                     query=safe_query,
                     answer=answer,
@@ -1211,6 +1346,11 @@ class KnowledgeAgent:
                     "agent_mode": performance.get("agent_mode"),
                     "chat_execution_mode": execution_mode,
                     "chat_execution_mode_label": execution_mode_label,
+                    "agent_flow": agent_flow,
+                    "agents_used": agents_used,
+                    "supervisor_decisions": supervisor_decisions,
+                    "agent_latencies_ms": agent_latencies_ms,
+                    "agent_errors": agent_errors,
                 }
                 audit_event = self.audit.log_chat_event(
                     user=user_context,
@@ -1232,6 +1372,11 @@ class KnowledgeAgent:
                         "sources": sources,
                         "tools_used": tools_used,
                         "tool_flow": tool_flow,
+                        "agent_flow": agent_flow,
+                        "agents_used": agents_used,
+                        "supervisor_decisions": supervisor_decisions,
+                        "agent_latencies_ms": agent_latencies_ms,
+                        "agent_errors": agent_errors,
                         "input_tokens": input_tokens,
                         "output_tokens": output_tokens,
                         "latency_ms": latency_ms,
@@ -1299,6 +1444,11 @@ class KnowledgeAgent:
                     metadata={
                         "tools_used": tools_used,
                         "tool_flow": tool_flow,
+                        "agent_flow": agent_flow,
+                        "agents_used": agents_used,
+                        "supervisor_decisions": supervisor_decisions,
+                        "agent_latencies_ms": agent_latencies_ms,
+                        "agent_errors": agent_errors,
                         "input_tokens": input_tokens,
                         "output_tokens": output_tokens,
                         "latency_ms": latency_ms,
@@ -1337,6 +1487,11 @@ class KnowledgeAgent:
                 "audit_event": audit_event,
                 "catalog_guidance": catalog_guidance,
                 "tool_flow": tool_flow,
+                "agent_flow": agent_flow,
+                "agents_used": agents_used,
+                "supervisor_decisions": supervisor_decisions,
+                "agent_latencies_ms": agent_latencies_ms,
+                "agent_errors": agent_errors,
                 "llm_error": self._llm_error,
                 **trace_metadata,
                 "performance": performance,
@@ -1661,6 +1816,44 @@ class KnowledgeAgent:
             return self._format_retrieval_hits(hits), _source_dicts_from_hits(hits), [guidance]
         return self._run_tool(name, query), [], []
 
+    def _run_specialist_agent(
+        self, name: str, query: str, user_context: HealthcareUserContext
+    ) -> SpecialistAgentResult:
+        agent_name = _agent_name_for_tool(name)
+        started = time.perf_counter()
+        try:
+            output, sources, catalog_guidance = self._run_graph_tool(name, query, user_context)
+            latency_ms = _elapsed_ms(started)
+            status = "ok"
+            if name in RETRIEVAL_SOURCE_TOOLS and not sources:
+                status = "no_evidence"
+            elif not output or "No relevant document chunks found." in output:
+                status = "no_evidence"
+            tool_flow = _tool_flow_from_execution([name], catalog_guidance)
+            return SpecialistAgentResult(
+                agent_name=agent_name,
+                status=status,
+                answer_fragment=output,
+                tool_context=f"{name} results:\n{output}",
+                sources=sources,
+                tools_used=[name],
+                tool_flow=tool_flow,
+                catalog_guidance=catalog_guidance,
+                performance={agent_name: latency_ms},
+            )
+        except Exception as exc:
+            latency_ms = _elapsed_ms(started)
+            error = f"{type(exc).__name__}: {exc}"
+            return SpecialistAgentResult(
+                agent_name=agent_name,
+                status="failed",
+                answer_fragment=error,
+                tool_context=f"{name} failed:\n{error}",
+                tools_used=[],
+                performance={agent_name: latency_ms},
+                errors=[error],
+            )
+
     def _format_retrieval_hits(self, hits: list[RetrievalHit]) -> str:
         if not hits:
             return "No relevant document chunks found."
@@ -1858,6 +2051,8 @@ class KnowledgeAgent:
                     [_make_system_message(system_prompt), _make_human_message(user_prompt)],
                     config,
                 )
+                direct_ms = _elapsed_ms(direct_started)
+                agent_flow = _agent_flow_for_synthesis(reason="direct_fallback", latency_ms=direct_ms)
                 return GraphAgentResult(
                     answer=_message_text(response),
                     sources=[],
@@ -1866,7 +2061,8 @@ class KnowledgeAgent:
                     performance={
                         **performance,
                         "agent_mode": "direct_fallback",
-                        "llm_direct_answer_ms": _elapsed_ms(direct_started),
+                        "llm_direct_answer_ms": direct_ms,
+                        **_agent_metadata_from_flow(agent_flow),
                     },
                 )
             except Exception as exc:
@@ -1926,6 +2122,13 @@ class KnowledgeAgent:
             payload = json.loads(tool_output)
         except json.JSONDecodeError:
             payload = {}
+        agent_flow = _agent_flow_for_tool(
+            tool_name="postgres_deterministic_lookup",
+            query=tool_query,
+            reason="deterministic_preflight",
+            latency_ms=tool_ms,
+        )
+        agent_metadata = _agent_metadata_from_flow(agent_flow)
         return GraphAgentResult(
             answer=_format_deterministic_lookup_payload(original_query, payload if isinstance(payload, dict) else {}),
             sources=sources,
@@ -1938,6 +2141,7 @@ class KnowledgeAgent:
                 "deterministic_preflight_query": tool_query,
                 "planned_tools": ["postgres_deterministic_lookup"],
                 "deterministic_formatter": "entity_details",
+                **agent_metadata,
             },
         )
 
@@ -1958,9 +2162,20 @@ class KnowledgeAgent:
                 all_guidance.extend(catalog_guidance)
                 tool_outputs.append(f"{tool_name} results:\n{tool_output}")
             tool_context = "\n\n".join(tool_outputs)
+            agent_flow: list[dict[str, Any]] = []
+            for tool_name in planned_tools:
+                agent_flow.extend(
+                    _agent_flow_for_tool(
+                        tool_name=tool_name,
+                        query=query,
+                        reason="offline_planned_tool",
+                    )
+                )
+            agent_flow.extend(_agent_flow_for_synthesis(reason="offline_multi_tool"))
             performance: dict[str, Any] = {
                 "agent_mode": "offline_multi_tool",
                 "agent_execution_ms": _elapsed_ms(started),
+                **_agent_metadata_from_flow(agent_flow),
             }
             _add_tool_timing(performance, all_guidance)
             return GraphAgentResult(
@@ -1978,9 +2193,16 @@ class KnowledgeAgent:
                 offline_tool, query, user_context
             )
             tool_context = f"{offline_tool} results:\n" + tool_output
+            agent_flow = _agent_flow_for_tool(
+                tool_name=offline_tool,
+                query=query,
+                reason="offline_planned_tool",
+            )
+            agent_flow.extend(_agent_flow_for_synthesis(reason="offline_single_tool"))
             performance: dict[str, Any] = {
                 "agent_mode": "offline_deterministic_lookup",
                 "agent_execution_ms": _elapsed_ms(started),
+                **_agent_metadata_from_flow(agent_flow),
             }
             return GraphAgentResult(
                 answer=self._offline_answer(query=query, tool_context=tool_context),
@@ -1993,7 +2215,16 @@ class KnowledgeAgent:
 
         tool_output, sources, catalog_guidance = self._run_graph_tool("rag_search", query, user_context)
         tool_context = "RAG search results:\n" + tool_output
-        performance: dict[str, Any] = {"agent_mode": "offline_rag"}
+        agent_flow = _agent_flow_for_tool(
+            tool_name="rag_search",
+            query=query,
+            reason="offline_default_rag",
+        )
+        agent_flow.extend(_agent_flow_for_synthesis(reason="offline_rag"))
+        performance: dict[str, Any] = {
+            "agent_mode": "offline_rag",
+            **_agent_metadata_from_flow(agent_flow),
+        }
         _add_tool_timing(performance, catalog_guidance)
         performance["agent_execution_ms"] = _elapsed_ms(started)
         return GraphAgentResult(
@@ -2095,6 +2326,22 @@ class KnowledgeAgent:
             "agent_execution_ms": _elapsed_ms(started),
             "planned_tools": list(planned_tools),
         }
+        agent_flow: list[dict[str, Any]] = []
+        for tool_name in planned_tools:
+            agent_flow.extend(
+                _agent_flow_for_tool(
+                    tool_name=tool_name,
+                    query=original_query,
+                    reason="fast_planned",
+                )
+            )
+        agent_flow.extend(
+            _agent_flow_for_synthesis(
+                reason="fast_planned_synthesis",
+                latency_ms=int(performance.get("llm_final_ms") or 0),
+            )
+        )
+        performance.update(_agent_metadata_from_flow(agent_flow))
         _add_tool_timing(performance, all_guidance)
         return GraphAgentResult(
             answer=_message_text(response),
@@ -2137,6 +2384,18 @@ class KnowledgeAgent:
             "llm_final_ms": _elapsed_ms(llm_started),
             "agent_execution_ms": _elapsed_ms(started),
         }
+        agent_flow = _agent_flow_for_tool(
+            tool_name="rag_search",
+            query=original_query,
+            reason="fast_rag",
+        )
+        agent_flow.extend(
+            _agent_flow_for_synthesis(
+                reason="fast_rag_synthesis",
+                latency_ms=int(performance.get("llm_final_ms") or 0),
+            )
+        )
+        performance.update(_agent_metadata_from_flow(agent_flow))
         _add_tool_timing(performance, catalog_guidance)
         return GraphAgentResult(
             answer=_message_text(response),
@@ -2189,10 +2448,15 @@ class KnowledgeAgent:
             from typing import TypedDict  # type: ignore
 
         class GraphState(TypedDict, total=False):
+            supervisor_ready: bool
             result: GraphAgentResult
 
-        def agent_loop(state: GraphState) -> GraphState:
+        def supervisor(state: GraphState) -> GraphState:
+            return {**state, "supervisor_ready": True}
+
+        def specialist_loop(state: GraphState) -> GraphState:
             return {
+                **state,
                 "result": self._call_tool_loop_agent(
                     llm=llm,
                     system_prompt=system_prompt,
@@ -2204,9 +2468,11 @@ class KnowledgeAgent:
             }
 
         graph_builder = StateGraph(GraphState)
-        graph_builder.add_node("agent_loop", agent_loop)
-        graph_builder.add_edge(START, "agent_loop")
-        graph_builder.add_edge("agent_loop", END)
+        graph_builder.add_node("supervisor", supervisor)
+        graph_builder.add_node("specialist_loop", specialist_loop)
+        graph_builder.add_edge(START, "supervisor")
+        graph_builder.add_edge("supervisor", "specialist_loop")
+        graph_builder.add_edge("specialist_loop", END)
         graph = graph_builder.compile()
 
         final_state = graph.invoke({})
@@ -2229,6 +2495,10 @@ class KnowledgeAgent:
         sources: list[dict[str, Any]] = []
         tool_outputs: list[str] = []
         catalog_guidance: list[dict[str, Any]] = []
+        agent_flow: list[dict[str, Any]] = []
+        agent_latencies_ms: dict[str, int] = {}
+        agent_errors: list[dict[str, Any]] = []
+        supervisor_decisions: list[dict[str, Any]] = []
         performance: dict[str, Any] = {"llm_call_count": 0}
         max_llm_calls = max(1, self.settings.max_graph_llm_calls or MAX_GRAPH_LLM_CALLS)
 
@@ -2244,6 +2514,29 @@ class KnowledgeAgent:
                     _add_timing(performance, "llm_final_ms", llm_ms)
                 else:
                     _add_timing(performance, "llm_direct_answer_ms", llm_ms)
+                synthesis_flow = {
+                    "agent": "SynthesisAgent",
+                    "kind": "synthesis",
+                    "status": "answered",
+                    "latency_ms": llm_ms,
+                }
+                if not agent_flow:
+                    decision = {
+                        "agent": "SupervisorAgent",
+                        "kind": "supervisor",
+                        "decision": "synthesize",
+                        "selected_agent": "SynthesisAgent",
+                        "reason": "llm_answer_without_tool_calls",
+                    }
+                    agent_flow.append(decision)
+                    supervisor_decisions.append(decision)
+                agent_flow.append(synthesis_flow)
+                agent_latencies_ms["SynthesisAgent"] = agent_latencies_ms.get("SynthesisAgent", 0) + llm_ms
+                agent_metadata = _agent_metadata_from_flow(agent_flow)
+                performance.update(agent_metadata)
+                performance["supervisor_decisions"] = supervisor_decisions or agent_metadata["supervisor_decisions"]
+                performance["agent_latencies_ms"] = {**agent_metadata["agent_latencies_ms"], **agent_latencies_ms}
+                performance["agent_errors"] = agent_errors or agent_metadata["agent_errors"]
                 return GraphAgentResult(
                     answer=_message_text(response),
                     sources=_dedupe_sources(sources),
@@ -2257,13 +2550,56 @@ class KnowledgeAgent:
                 name = _tool_call_name(tool_call)
                 query = _tool_query(_tool_call_args(tool_call), original_query)
                 tool_call_id = _tool_call_id(tool_call)
+                agent_name = _agent_name_for_tool(name)
+                decision = {
+                    "agent": "SupervisorAgent",
+                    "kind": "supervisor",
+                    "decision": "route",
+                    "selected_agent": agent_name,
+                    "tool": name,
+                    "query": query,
+                    "reason": "llm_tool_call",
+                }
+                agent_flow.append(decision)
+                supervisor_decisions.append(decision)
                 if name not in tool_names:
                     output = f"Tool {name!r} is not registered."
                     new_sources = []
                     new_guidance = []
+                    latency_ms = 0
+                    agent_error = {"agent": agent_name, "tool": name, "error": output}
+                    agent_errors.append(agent_error)
+                    agent_flow.append(
+                        {
+                            "agent": agent_name,
+                            "kind": "specialist",
+                            "tool": name,
+                            "query": query,
+                            "status": "failed",
+                            "latency_ms": latency_ms,
+                            "error": output,
+                        }
+                    )
                 else:
-                    output, new_sources, new_guidance = self._run_graph_tool(
-                        name, query, user_context
+                    specialist_result = self._run_specialist_agent(name, query, user_context)
+                    output = specialist_result.answer_fragment
+                    new_sources = specialist_result.sources
+                    new_guidance = specialist_result.catalog_guidance
+                    latency_ms = int(specialist_result.performance.get(agent_name, 0) or 0)
+                    agent_latencies_ms[agent_name] = agent_latencies_ms.get(agent_name, 0) + latency_ms
+                    if specialist_result.errors:
+                        for error in specialist_result.errors:
+                            agent_errors.append({"agent": agent_name, "tool": name, "error": error})
+                    agent_flow.append(
+                        {
+                            "agent": agent_name,
+                            "kind": "specialist",
+                            "tool": name,
+                            "query": query,
+                            "status": specialist_result.status,
+                            "latency_ms": latency_ms,
+                            "source_count": len(new_sources),
+                        }
                     )
                     tools_used.append(name)
                 sources.extend(new_sources)
@@ -2280,9 +2616,24 @@ class KnowledgeAgent:
         )
         llm_started = time.perf_counter()
         response = self._invoke_model(llm, messages, config)
-        _add_timing(performance, "llm_final_ms", _elapsed_ms(llm_started))
+        synthesis_ms = _elapsed_ms(llm_started)
+        _add_timing(performance, "llm_final_ms", synthesis_ms)
         performance["llm_call_count"] = int(performance["llm_call_count"]) + 1
         messages.append(response)
+        agent_flow.append(
+            {
+                "agent": "SynthesisAgent",
+                "kind": "synthesis",
+                "status": "tool_limit_final_answer",
+                "latency_ms": synthesis_ms,
+            }
+        )
+        agent_latencies_ms["SynthesisAgent"] = agent_latencies_ms.get("SynthesisAgent", 0) + synthesis_ms
+        agent_metadata = _agent_metadata_from_flow(agent_flow)
+        performance.update(agent_metadata)
+        performance["supervisor_decisions"] = supervisor_decisions or agent_metadata["supervisor_decisions"]
+        performance["agent_latencies_ms"] = {**agent_metadata["agent_latencies_ms"], **agent_latencies_ms}
+        performance["agent_errors"] = agent_errors or agent_metadata["agent_errors"]
         return GraphAgentResult(
             answer=_message_text(response),
             sources=_dedupe_sources(sources),
