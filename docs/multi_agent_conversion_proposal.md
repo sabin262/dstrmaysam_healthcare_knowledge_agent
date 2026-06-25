@@ -1,4 +1,4 @@
-# Multi-Agent Conversion Proposal
+# Healthcare Multi-Agent Proposal
 
 ## Executive Summary
 
@@ -77,7 +77,6 @@ Responsibilities:
 
 - Catalog-guided RAG.
 - OpenSearch retrieval in AWS mode.
-- ChromaDB retrieval in local mode.
 - Source snippets and citations.
 
 ### PolicyAgent
@@ -129,6 +128,7 @@ The conversion builds on the existing stack:
 
 - FastAPI for backend APIs.
 - Streamlit for frontend pages.
+- MCP server to host tools
 - LangGraph for multi-agent workflow orchestration.
 - LangChain Azure OpenAI integrations for chat models, embeddings, messages, and tool compatibility.
 - Azure OpenAI for LLM and embedding deployments.
@@ -137,32 +137,9 @@ The conversion builds on the existing stack:
 - S3 for AWS document storage and manifests.
 - Langfuse for traces, prompt management, token metadata, tool flow, and scores.
 - RAGAS for background and offline answer evaluation.
+- Hosted on AWS using ECR and ECS
+- CICD using CodePipleline, CodeBuild and CodeDeploy
 
-## Target Workflow
-
-```mermaid
-flowchart TD
-    User["User query"] --> API["FastAPI /chat"]
-    API --> Context["Auth, user context, history, PHI redaction"]
-    Context --> Supervisor["SupervisorAgent"]
-
-    Supervisor --> Deterministic["DeterministicLookupAgent"]
-    Supervisor --> RAG["RAGAgent"]
-    Supervisor --> Policy["PolicyAgent"]
-    Supervisor --> Catalog["CatalogAgent"]
-    Supervisor --> Safety["SafetyAgent"]
-
-    Deterministic --> Evidence["Evidence state"]
-    RAG --> Evidence
-    Policy --> Evidence
-    Catalog --> Evidence
-    Safety --> Evidence
-
-    Evidence --> Supervisor
-    Supervisor --> Synthesis["SynthesisAgent"]
-    Synthesis --> Final["Final answer"]
-    Final --> Trace["Langfuse, dashboard metadata, RAGAS"]
-```
 
 ## Expected Benefits
 
@@ -181,6 +158,8 @@ The conversion is successful when:
 
 - `/chat` request and response shape remain unchanged.
 - Existing frontend behavior continues to work.
+- Tools are called using MCP server.
+- Deployed to AWS using CICD pipeline.
 - Deterministic lookup, RAG, policy search, catalog search, and safety behavior still work.
 - `agent_flow` is stored in metadata and visible in the dashboard.
 - Langfuse traces show the supervisor and specialist flow.
@@ -188,16 +167,5 @@ The conversion is successful when:
 - Existing tests pass.
 - New tests prove supervisor routing and specialist behavior.
 
-## Recommended Implementation Strategy
 
-Implement this in phases:
-
-1. Add internal specialist result contracts and metadata fields.
-2. Extract current deterministic, RAG, policy, catalog, and safety behavior into specialist wrappers.
-3. Replace the current single-node LangGraph wrapper with the supervisor graph.
-4. Preserve current fast paths and execution modes.
-5. Add dashboard display for `agent_flow`.
-6. Add tests for routing, metadata, API compatibility, and regression behavior.
-
-This approach minimizes user-facing change while improving the internal architecture.
 
