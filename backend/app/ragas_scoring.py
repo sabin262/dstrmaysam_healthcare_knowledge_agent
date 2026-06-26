@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import re
 import os
+import asyncio
+import inspect
 from typing import TYPE_CHECKING, Any
 
 os.environ.setdefault("GIT_PYTHON_REFRESH", "quiet")
@@ -110,14 +112,17 @@ def _compute_with_ragas(
     if settings is not None and secret_provider is not None:
         ragas_llm, ragas_embeddings = _build_ragas_azure_clients(settings, secret_provider)
 
-    result = evaluate(
-        dataset,
-        metrics=[faithfulness, answer_relevancy, LLMContextPrecisionWithoutReference()],
-        llm=ragas_llm,
-        embeddings=ragas_embeddings,
-        raise_exceptions=True,
-        show_progress=False,
-    )
+    try:
+        result = evaluate(
+            dataset,
+            metrics=[faithfulness, answer_relevancy, LLMContextPrecisionWithoutReference()],
+            llm=ragas_llm,
+            embeddings=ragas_embeddings,
+            raise_exceptions=True,
+            show_progress=False,
+        )
+    finally:
+        _close_ragas_clients(ragas_llm, ragas_embeddings)
     rows = result.to_pandas().to_dict(orient="records")
     if not rows:
         return {}
@@ -136,16 +141,19 @@ def _build_ragas_azure_clients(
 ) -> tuple[Any, Any]:
     os.environ.setdefault("GIT_PYTHON_REFRESH", "quiet")
     from langchain_openai import AzureChatOpenAI, AzureOpenAIEmbeddings
-    from ragas.embeddings import LangchainEmbeddingsWrapper
-    from ragas.llms import LangchainLLMWrapper
+    from ragas.embeddings.base import LangchainEmbeddingsWrapper
+    from ragas.llms.base import LangchainLLMWrapper
+    from ragas.run_config import RunConfig
 
     secrets = secret_provider.load_azure_openai()
+    run_config = RunConfig(timeout=90, max_retries=2, max_workers=1)
     llm = AzureChatOpenAI(
         azure_endpoint=secrets.endpoint,
         api_key=secrets.api_key,
         api_version=secrets.api_version,
         azure_deployment=secrets.fast_chat_deployment or secrets.chat_deployment,
         temperature=0,
+        n=1,
         timeout=60,
         max_retries=2,
     )
@@ -157,7 +165,51 @@ def _build_ragas_azure_clients(
         timeout=60,
         max_retries=2,
     )
-    return LangchainLLMWrapper(llm), LangchainEmbeddingsWrapper(embeddings)
+    return (
+        LangchainLLMWrapper(llm, run_config=run_config, bypass_n=True),
+        LangchainEmbeddingsWrapper(embeddings, run_config=run_config),
+    )
+
+
+def _close_ragas_clients(ragas_llm: Any, ragas_embeddings: Any) -> None:
+    for owner in _ragas_client_owners(ragas_llm, ragas_embeddings):
+        for attr in ("root_async_client", "root_client", "http_async_client", "http_client"):
+            _close_maybe_async(getattr(owner, attr, None))
+        for resource_attr in ("async_client", "client"):
+            resource = getattr(owner, resource_attr, None)
+            _close_maybe_async(getattr(resource, "_client", None))
+
+
+def _ragas_client_owners(ragas_llm: Any, ragas_embeddings: Any) -> list[Any]:
+    owners: list[Any] = []
+    llm = getattr(ragas_llm, "langchain_llm", None)
+    if llm is not None:
+        owners.append(llm)
+    embeddings = getattr(ragas_embeddings, "embeddings", None)
+    if embeddings is not None:
+        owners.append(embeddings)
+    return owners
+
+
+def _close_maybe_async(client: Any) -> None:
+    if client is None:
+        return
+    try:
+        is_closed = getattr(client, "is_closed", None)
+        if callable(is_closed) and is_closed():
+            return
+        close = getattr(client, "close", None)
+        if close is None:
+            return
+        if inspect.iscoroutinefunction(close):
+            asyncio.run(close())
+            return
+        result = close()
+        if inspect.isawaitable(result):
+            asyncio.run(result)
+    except RuntimeError as exc:
+        if "Event loop is closed" not in str(exc):
+            raise
 
 
 def _lexical_fallback_scores(question: str, answer: str, contexts: list[str]) -> dict[str, float]:

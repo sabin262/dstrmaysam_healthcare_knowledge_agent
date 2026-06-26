@@ -1,4 +1,5 @@
 import unittest
+import asyncio
 from dataclasses import replace
 
 from backend.app.config import AppSettings
@@ -118,6 +119,40 @@ class LiveRagasScoringTests(unittest.TestCase):
 
         self.assertEqual(type(ragas_llm).__name__, "LangchainLLMWrapper")
         self.assertEqual(type(ragas_embeddings).__name__, "LangchainEmbeddingsWrapper")
+
+    def test_closes_owned_sync_and_async_clients(self):
+        class AsyncClient:
+            def __init__(self):
+                self.closed = False
+
+            async def close(self):
+                await asyncio.sleep(0)
+                self.closed = True
+
+        class SyncClient:
+            def __init__(self):
+                self.closed = False
+
+            def close(self):
+                self.closed = True
+
+        class Owner:
+            def __init__(self):
+                self.root_async_client = AsyncClient()
+                self.root_client = SyncClient()
+                self.http_async_client = None
+                self.http_client = None
+
+        class Wrapper:
+            def __init__(self):
+                self.langchain_llm = Owner()
+
+        wrapper = Wrapper()
+
+        ragas_scoring._close_ragas_clients(wrapper, None)
+
+        self.assertTrue(wrapper.langchain_llm.root_async_client.closed)
+        self.assertTrue(wrapper.langchain_llm.root_client.closed)
 
 
 if __name__ == "__main__":
